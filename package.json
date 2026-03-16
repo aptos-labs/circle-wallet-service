@@ -1,0 +1,9 @@
+{
+	"dependencies": {
+"@circle-fin/developer-controlled-wallets": "^10.2.0"
+
+	},
+  "devDependencies": {
+    "tsx": "^4.21.0"
+  }
+}

@@ -1,0 +1,468 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Contract API",
+    "version": "2.0.0",
+    "description": "Generic REST API for interacting with Aptos Move contracts.\n\n## Endpoints\n\n- **POST /v1/contracts/execute** — Submit an entry function transaction (async)\n- **POST /v1/contracts/query** — Call a view function (sync)\n- **GET /v1/transactions/{id}** — Poll transaction status\n\n## Async Submission Model\n\nExecute requests return `202 Accepted` with a `transaction_id`. The transaction is submitted to the Aptos blockchain and processed in the background. Use `GET /v1/transactions/{id}` to poll for the final status.\n\n### Transaction Lifecycle\n\n1. **pending** — Accepted by the API, queued for submission\n2. **submitted** — Sent to the Aptos blockchain, awaiting confirmation\n3. **confirmed** — Successfully committed on-chain\n4. **failed** — Transaction failed (may be retried automatically)\n5. **expired** — Transaction expired before confirmation\n6. **permanently_failed** — Unrecoverable failure after all retries exhausted\n\n## Authentication\n\nAll endpoints except `/v1/health` and `/v1/openapi.yaml` require an API key passed in the `Authorization` header. Requests without a valid key receive `401 Unauthorized`.\n\n## Error Handling\n\nErrors return a JSON body with a single `error` field:\n```json\n{\"error\": \"description of the problem\"}\n```\n\n## Arguments\n\nArguments are untyped (strings, numbers, arrays) — matching the native Aptos REST API convention. The server resolves argument types by fetching the module ABI from the Aptos node (cached per module) and handles BCS serialization automatically.\n\nSupported Move types: `address`, `bool`, `u8`–`u256`, `0x1::string::String`, `vector\u003cT\u003e`, `0x1::object::Object\u003cT\u003e`.\n\n## Address Format\n\nAll address parameters accept Aptos account addresses as hex strings (e.g., `0x1`). Addresses are validated on the server side; invalid addresses return `400 Bad Request`.\n\n## Request Validation\n\n- Request bodies must be valid JSON with `Content-Type: application/json`\n- Unknown fields in the request body are rejected (`400 Bad Request`)\n- Missing required fields return `400 Bad Request` with a descriptive message"
+  },
+  "tags": [
+    {
+      "name": "Execute",
+      "description": "Submit entry function transactions to any Move contract"
+    },
+    {
+      "name": "Query",
+      "description": "Call view functions on any Move contract"
+    },
+    {
+      "name": "Transactions",
+      "description": "Track transaction status"
+    },
+    {
+      "name": "Health",
+      "description": "Server health check"
+    }
+  ],
+  "paths": {
+    "/v1/contracts/execute": {
+      "post": {
+        "operationId": "executeContract",
+        "summary": "Execute an entry function",
+        "description": "Submits a transaction calling the specified Move entry function. Arguments are untyped — the server resolves types from the on-chain module ABI and handles BCS serialization. Returns 202 with a transaction_id for polling.\n\n**Example: Mint tokens**\n```json\n{\n  \"function_id\": \"0x1234::contractInt::mint\",\n  \"type_arguments\": [],\n  \"arguments\": [\"0x5678abcd...\", \"10000\"],\n  \"signer\": \"minter\",\n  \"max_gas_amount\": 200000\n}\n```",
+        "tags": [
+          "Execute"
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "Entry function call parameters",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecuteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Transaction accepted and queued for submission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmitResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (bad function_id format, wrong argument count, unsupported type, etc.)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error (ABI fetch failure, signing error, etc.)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/contracts/query": {
+      "post": {
+        "operationId": "queryContract",
+        "summary": "Call a view function",
+        "description": "Calls a Move view function and returns the result synchronously. The request is proxied to the Aptos node's /view endpoint, which handles ABI resolution and argument serialization internally.\n\n**Example: Check balance**\n```json\n{\n  \"function_id\": \"0x1234::contractInt::balance_of\",\n  \"type_arguments\": [],\n  \"arguments\": [\"0x5678abcd...\"]\n}\n```\n\nReturns: `{\"result\": [\"10000\"]}`",
+        "tags": [
+          "Query"
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "View function call parameters",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "View function executed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or Aptos view function error (bad function_id, wrong args, on-chain abort, etc.)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Aptos node unreachable or returned an unexpected error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/docs": {
+      "get": {
+        "operationId": "apiDocs",
+        "summary": "Interactive API documentation",
+        "description": "Serves an interactive API documentation page powered by Scalar, which reads from the OpenAPI spec at /v1/openapi.yaml.",
+        "tags": [
+          "Health"
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML page with interactive API documentation"
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "operationId": "healthCheck",
+        "summary": "Health check",
+        "description": "Returns the server health status. This endpoint does not require authentication.",
+        "tags": [
+          "Health"
+        ],
+        "responses": {
+          "200": {
+            "description": "Server is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/transactions/{id}": {
+      "get": {
+        "operationId": "getTransaction",
+        "summary": "Get transaction status",
+        "description": "Returns the current status and details of a previously submitted transaction. Use this endpoint to poll for transaction confirmation after calling the execute endpoint. Terminal statuses are: confirmed, failed, expired, permanently_failed.",
+        "tags": [
+          "Transactions"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Transaction ID (UUID) returned by the execute endpoint",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transaction record found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or empty transaction ID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Transaction not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error (database failure)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "description": "Standard error response returned for all 4xx and 5xx status codes.",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Human-readable error description",
+            "example": "invalid function_id: expected format addr::module::function"
+          }
+        }
+      },
+      "ExecuteRequest": {
+        "type": "object",
+        "description": "Request body for executing a Move entry function as a blockchain transaction.",
+        "properties": {
+          "arguments": {
+            "type": "array",
+            "description": "Function arguments as untyped values (strings, numbers, arrays). The server resolves the expected types from the on-chain module ABI and serializes via BCS.",
+            "items": {
+              "description": "Argument value — type is inferred from the on-chain ABI"
+            }
+          },
+          "function_id": {
+            "type": "string",
+            "description": "Fully qualified Move function ID in the format addr::module::function",
+            "example": "0x1234::contractInt::mint"
+          },
+          "max_gas_amount": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "Optional gas limit override for this transaction. If omitted, the server's default max_gas_amount is used."
+          },
+          "signer": {
+            "type": "string",
+            "description": "Name of the configured signer role to sign the transaction (e.g., minter, owner, denylister)",
+            "example": "minter"
+          },
+          "type_arguments": {
+            "type": "array",
+            "description": "Move type arguments for generic functions (e.g., [\"0x1::aptos_coin::AptosCoin\"]). Pass an empty array if the function has no type parameters.",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "function_id",
+          "signer"
+        ]
+      },
+      "HealthResponse": {
+        "type": "object",
+        "description": "Health check response indicating server status.",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Server health status",
+            "example": "ok"
+          }
+        }
+      },
+      "QueryRequest": {
+        "type": "object",
+        "description": "Request body for calling a Move view function (read-only, no transaction).",
+        "properties": {
+          "arguments": {
+            "type": "array",
+            "description": "View function arguments as untyped values. The Aptos node resolves types from the on-chain ABI.",
+            "items": {
+              "description": "Argument value — type is inferred by the Aptos node"
+            }
+          },
+          "function_id": {
+            "type": "string",
+            "description": "Fully qualified Move view function ID in the format addr::module::function",
+            "example": "0x1234::contractInt::balance_of"
+          },
+          "type_arguments": {
+            "type": "array",
+            "description": "Move type arguments for generic view functions. Pass an empty array if the function has no type parameters.",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "function_id"
+        ]
+      },
+      "QueryResponse": {
+        "type": "object",
+        "description": "Response from a successful view function call.",
+        "properties": {
+          "result": {
+            "type": "array",
+            "description": "View function return values as a JSON array. Element types depend on the Move function's return signature (e.g., [\"10000\"] for a u64 return).",
+            "items": {
+              "description": "Return value — type depends on the Move function signature"
+            }
+          }
+        }
+      },
+      "SubmitResponse": {
+        "type": "object",
+        "description": "Response returned when a transaction is accepted for processing.",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Initial transaction status (always \"pending\" on creation)",
+            "example": "pending"
+          },
+          "transaction_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Unique identifier for tracking the transaction via GET /v1/transactions/{id}",
+            "example": "550e8400-e29b-41d4-a716-446655440000"
+          }
+        }
+      },
+      "TransactionRecord": {
+        "type": "object",
+        "description": "Full record of a submitted transaction, including its current lifecycle status.",
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "description": "Current attempt number (0-indexed). Incremented on each automatic retry."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Timestamp when the transaction was first accepted by the API"
+          },
+          "error_message": {
+            "type": "string",
+            "description": "Error message from the most recent failure, if any"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Unique transaction identifier assigned by the API"
+          },
+          "max_retries": {
+            "type": "integer",
+            "description": "Maximum number of retry attempts before the transaction is marked permanently_failed"
+          },
+          "nonce": {
+            "type": "integer",
+            "description": "Orderless replay-protection nonce used for this transaction"
+          },
+          "operation_type": {
+            "type": "string",
+            "description": "The type of operation (e.g., \"execute\")"
+          },
+          "request_payload": {
+            "type": "string",
+            "description": "Original JSON request body stored for audit logging and transaction resubmission"
+          },
+          "sender_address": {
+            "type": "string",
+            "description": "Aptos account address of the signer who submitted the transaction"
+          },
+          "status": {
+            "type": "string",
+            "description": "Current lifecycle status of the transaction",
+            "enum": [
+              "pending",
+              "submitted",
+              "confirmed",
+              "failed",
+              "expired",
+              "permanently_failed"
+            ]
+          },
+          "txn_hash": {
+            "type": "string",
+            "description": "On-chain transaction hash (populated after submission to the Aptos node)"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Timestamp of the most recent status update"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "apiKeyAuth": {
+        "type": "apiKey",
+        "name": "Authorization",
+        "in": "header",
+        "description": "API key for authentication. Pass the raw key value in the Authorization header."
+      }
+    }
+  },
+  "security": [
+    {
+      "apiKeyAuth": []
+    }
+  ]
+}
