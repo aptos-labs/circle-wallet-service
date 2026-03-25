@@ -30,13 +30,13 @@ type Config struct {
 	OwnerPrivateKey           string
 
 	// Circle signer
-	CircleAPIKey        string
-	CircleEntitySecret  string
-	MinterWalletID               string
-	DenylisterWalletID           string
-	MasterMinterWalletID         string
-	MetadataUpdaterWalletID      string
-	OwnerWalletID                string
+	CircleAPIKey            string
+	CircleEntitySecret      string
+	MinterWalletID          string
+	DenylisterWalletID      string
+	MasterMinterWalletID    string
+	MetadataUpdaterWalletID string
+	OwnerWalletID           string
 
 	// Per-role public keys (required for Circle signer)
 	MinterPublicKey          string
@@ -117,43 +117,43 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		ServerPort:                   getEnv("SERVER_PORT", "8080"),
-		APIKey:                       getEnv("API_KEY", ""),
-		TestingMode:                  getEnvBool("TESTING_MODE", false),
-		AptosNodeURL:                 getEnv("APTOS_NODE_URL", "https://api.testnet.aptoslabs.com/v1"),
-		AptosChainID:   chainID,
-		SignerProvider:               getEnv("SIGNER_PROVIDER", "local"),
-		MinterPrivateKey:             getEnv("MINTER_PRIVATE_KEY", ""),
-		DenylisterPrivateKey:         getEnv("DENYLISTER_PRIVATE_KEY", ""),
-		MasterMinterPrivateKey:       getEnv("MASTER_MINTER_PRIVATE_KEY", ""),
-		MetadataUpdaterPrivateKey:    getEnv("METADATA_UPDATER_PRIVATE_KEY", ""),
-		OwnerPrivateKey:              getEnv("OWNER_PRIVATE_KEY", ""),
-		CircleAPIKey:       getEnv("CIRCLE_API_KEY", ""),
-		CircleEntitySecret: getEnv("CIRCLE_ENTITY_SECRET", ""),
-		MinterWalletID:               getEnv("MINTER_WALLET_ID", ""),
-		DenylisterWalletID:           getEnv("DENYLISTER_WALLET_ID", ""),
-		MasterMinterWalletID:         getEnv("MASTER_MINTER_WALLET_ID", ""),
-		MetadataUpdaterWalletID:      getEnv("METADATA_UPDATER_WALLET_ID", ""),
-		OwnerWalletID:                getEnv("OWNER_WALLET_ID", ""),
-		MinterPublicKey:              getEnv("MINTER_PUBLIC_KEY", ""),
-		DenylisterPublicKey:          getEnv("DENYLISTER_PUBLIC_KEY", ""),
-		MasterMinterPublicKey:        getEnv("MASTER_MINTER_PUBLIC_KEY", ""),
-		MetadataUpdaterPublicKey:     getEnv("METADATA_UPDATER_PUBLIC_KEY", ""),
-		OwnerPublicKey:               getEnv("OWNER_PUBLIC_KEY", ""),
-		MinterAddress:                getEnv("MINTER_ADDRESS", ""),
-		DenylisterAddress:            getEnv("DENYLISTER_ADDRESS", ""),
-		MasterMinterAddress:          getEnv("MASTER_MINTER_ADDRESS", ""),
-		MetadataUpdaterAddress:       getEnv("METADATA_UPDATER_ADDRESS", ""),
-		OwnerAddress:                 getEnv("OWNER_ADDRESS", ""),
-		SQLitePath:                   getEnv("SQLITE_PATH", "./contractInt.db"),
-		MaxRetries:                   maxRetries,
-		PollIntervalSeconds:          pollInterval,
-		MaxBatchSize:                 maxBatchSize,
-		MaxGasAmount:                 maxGasAmount,
-		GasPerRecipient:              gasPerRecipient,
-		TxnExpirationSeconds:         txnExpiration,
-		RetryBackoffBaseSeconds:      backoffBase,
-		RetryBackoffMaxSeconds:       backoffMax,
+		ServerPort:                getEnv("SERVER_PORT", "8080"),
+		APIKey:                    getEnv("API_KEY", ""),
+		TestingMode:               getEnvBool("TESTING_MODE", false),
+		AptosNodeURL:              getEnv("APTOS_NODE_URL", "https://api.testnet.aptoslabs.com/v1"),
+		AptosChainID:              chainID,
+		SignerProvider:            getEnv("SIGNER_PROVIDER", "local"),
+		MinterPrivateKey:          getEnv("MINTER_PRIVATE_KEY", ""),
+		DenylisterPrivateKey:      getEnv("DENYLISTER_PRIVATE_KEY", ""),
+		MasterMinterPrivateKey:    getEnv("MASTER_MINTER_PRIVATE_KEY", ""),
+		MetadataUpdaterPrivateKey: getEnv("METADATA_UPDATER_PRIVATE_KEY", ""),
+		OwnerPrivateKey:           getEnv("OWNER_PRIVATE_KEY", ""),
+		CircleAPIKey:              getEnv("CIRCLE_API_KEY", ""),
+		CircleEntitySecret:        getEnv("CIRCLE_ENTITY_SECRET", ""),
+		MinterWalletID:            getEnv("MINTER_WALLET_ID", ""),
+		DenylisterWalletID:        getEnv("DENYLISTER_WALLET_ID", ""),
+		MasterMinterWalletID:      getEnv("MASTER_MINTER_WALLET_ID", ""),
+		MetadataUpdaterWalletID:   getEnv("METADATA_UPDATER_WALLET_ID", ""),
+		OwnerWalletID:             getEnv("OWNER_WALLET_ID", ""),
+		MinterPublicKey:           getEnv("MINTER_PUBLIC_KEY", ""),
+		DenylisterPublicKey:       getEnv("DENYLISTER_PUBLIC_KEY", ""),
+		MasterMinterPublicKey:     getEnv("MASTER_MINTER_PUBLIC_KEY", ""),
+		MetadataUpdaterPublicKey:  getEnv("METADATA_UPDATER_PUBLIC_KEY", ""),
+		OwnerPublicKey:            getEnv("OWNER_PUBLIC_KEY", ""),
+		MinterAddress:             getEnv("MINTER_ADDRESS", ""),
+		DenylisterAddress:         getEnv("DENYLISTER_ADDRESS", ""),
+		MasterMinterAddress:       getEnv("MASTER_MINTER_ADDRESS", ""),
+		MetadataUpdaterAddress:    getEnv("METADATA_UPDATER_ADDRESS", ""),
+		OwnerAddress:              getEnv("OWNER_ADDRESS", ""),
+		SQLitePath:                getEnv("SQLITE_PATH", "./contractInt.db"),
+		MaxRetries:                maxRetries,
+		PollIntervalSeconds:       pollInterval,
+		MaxBatchSize:              maxBatchSize,
+		MaxGasAmount:              maxGasAmount,
+		GasPerRecipient:           gasPerRecipient,
+		TxnExpirationSeconds:      txnExpiration,
+		RetryBackoffBaseSeconds:   backoffBase,
+		RetryBackoffMaxSeconds:    backoffMax,
 	}
 
 	if err := cfg.validate(); err != nil {

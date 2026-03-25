@@ -71,7 +71,9 @@ func (c *ABICache) fetchModule(addr, module string) (*moduleABI, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fetch module ABI: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		_ = Body.Close()
+	}(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

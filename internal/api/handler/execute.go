@@ -29,10 +29,10 @@ type executeOp struct {
 	gasOverride uint64
 }
 
-func (o *executeOp) Name() string                                      { return "execute" }
-func (o *executeOp) RequiredRole() string                              { return o.signer }
+func (o *executeOp) Name() string                                       { return "execute" }
+func (o *executeOp) RequiredRole() string                               { return o.signer }
 func (o *executeOp) BuildPayload() (aptossdk.TransactionPayload, error) { return o.payload, nil }
-func (o *executeOp) RequestJSON() []byte                               { return o.reqJSON }
+func (o *executeOp) RequestJSON() []byte                                { return o.reqJSON }
 
 // GasOverride returns the per-request gas override (0 means use default).
 func (o *executeOp) GasOverride() uint64 { return o.gasOverride }

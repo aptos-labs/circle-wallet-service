@@ -136,7 +136,7 @@ func (c *CircleClient) getRSAKey(ctx context.Context) (*rsa.PublicKey, error) {
 	}
 	rsaKey, ok := pub.(*rsa.PublicKey)
 	if !ok {
-		return nil, fmt.Errorf("Circle public key is not RSA")
+		return nil, fmt.Errorf("circle public key is not RSA")
 	}
 
 	c.rsaKey = rsaKey

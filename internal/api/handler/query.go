@@ -57,7 +57,9 @@ func Query(nodeURL string) http.HandlerFunc {
 			api.Error(w, http.StatusBadGateway, "aptos node request failed: "+err.Error())
 			return
 		}
-		defer resp.Body.Close()
+		defer func(Body io.ReadCloser) {
+			_ = Body.Close()
+		}(resp.Body)
 
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
