@@ -97,7 +97,7 @@ type mockOperation struct {
 }
 
 func (o *mockOperation) Name() string         { return o.name }
-func (o *mockOperation) RequiredRole() string { return o.role }
+func (o *mockOperation) SignerAddress() string { return o.role }
 func (o *mockOperation) RequestJSON() []byte  { return o.json }
 func (o *mockOperation) BuildPayload() (aptossdk.TransactionPayload, error) {
 	return o.payload, o.err

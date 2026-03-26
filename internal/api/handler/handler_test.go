@@ -101,13 +101,13 @@ func mustSubmittedOp(t *testing.T, mgr *mockSubmitter) txn.Operation {
 	return op
 }
 
-func assertOpMeta(t *testing.T, op txn.Operation, wantName, wantRole string) {
+func assertOpMeta(t *testing.T, op txn.Operation, wantName, wantSigner string) {
 	t.Helper()
 	if got := op.Name(); got != wantName {
 		t.Fatalf("op.Name() = %q, want %q", got, wantName)
 	}
-	if got := op.RequiredRole(); got != wantRole {
-		t.Fatalf("op.RequiredRole() = %q, want %q", got, wantRole)
+	if got := op.SignerAddress(); got != wantSigner {
+		t.Fatalf("op.SignerAddress() = %q, want %q", got, wantSigner)
 	}
 }
 
@@ -144,7 +144,7 @@ func mockABIServer(t *testing.T, params []string) *httptest.Server {
 
 func TestExecute_MissingFunctionID(t *testing.T) {
 	h := Execute(nil, nil)
-	w := postJSON(t, h, "/v1/contracts/execute", `{"signer":"minter","arguments":[]}`)
+	w := postJSON(t, h, "/v1/contracts/execute", fmt.Sprintf(`{"signer":"%s","arguments":[]}`, testAddr))
 	assertStatus(t, w, http.StatusBadRequest)
 }
 
@@ -156,7 +156,7 @@ func TestExecute_MissingSigner(t *testing.T) {
 
 func TestExecute_InvalidFunctionID(t *testing.T) {
 	h := Execute(nil, nil)
-	w := postJSON(t, h, "/v1/contracts/execute", `{"function_id":"bad","signer":"minter"}`)
+	w := postJSON(t, h, "/v1/contracts/execute", fmt.Sprintf(`{"function_id":"bad","signer":"%s"}`, testAddr))
 	assertStatus(t, w, http.StatusBadRequest)
 }
 
@@ -172,15 +172,15 @@ func TestExecute_Success(t *testing.T) {
 		"function_id": "%s::contractInt::mint",
 		"type_arguments": [],
 		"arguments": ["%s", "10000"],
-		"signer": "minter"
-	}`, testAddr, testAddr)
+		"signer": "%s"
+	}`, testAddr, testAddr, testAddr)
 	w := postJSON(t, h, "/v1/contracts/execute", body)
 	assertStatus(t, w, http.StatusAccepted)
 	assertJSONField(t, w, "transaction_id", "txn-123")
 	assertSubmitCalls(t, mgr, 1)
 
 	op := mustSubmittedOp(t, mgr)
-	assertOpMeta(t, op, "execute", "minter")
+	assertOpMeta(t, op, "execute", testAddr)
 }
 
 func TestExecute_WrongArgCount(t *testing.T) {
@@ -193,8 +193,8 @@ func TestExecute_WrongArgCount(t *testing.T) {
 	body := fmt.Sprintf(`{
 		"function_id": "%s::contractInt::mint",
 		"arguments": ["%s"],
-		"signer": "minter"
-	}`, testAddr, testAddr)
+		"signer": "%s"
+	}`, testAddr, testAddr, testAddr)
 	w := postJSON(t, h, "/v1/contracts/execute", body)
 	assertStatus(t, w, http.StatusBadRequest)
 }
@@ -214,8 +214,8 @@ func TestExecute_SubmitError(t *testing.T) {
 	body := fmt.Sprintf(`{
 		"function_id": "%s::contractInt::mint",
 		"arguments": ["%s", "10000"],
-		"signer": "minter"
-	}`, testAddr, testAddr)
+		"signer": "%s"
+	}`, testAddr, testAddr, testAddr)
 	w := postJSON(t, h, "/v1/contracts/execute", body)
 	assertStatus(t, w, http.StatusInternalServerError)
 }

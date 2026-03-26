@@ -348,22 +348,19 @@ func startTestServer() error {
 	}
 
 	registry := account.NewRegistry()
-	roles := []struct {
-		name string
-		key  *crypto.Ed25519PrivateKey
-	}{
-		{account.RoleOwner, ownerKey},
-		{account.RoleMasterMinter, masterMinterKey},
-		{account.RoleMinter, minterKey},
-		{account.RoleDenylister, denylisterKey},
-		{account.RoleMetadataUpdater, metadataUpdaterKey},
+	keys := []*crypto.Ed25519PrivateKey{
+		ownerKey,
+		masterMinterKey,
+		minterKey,
+		denylisterKey,
+		metadataUpdaterKey,
 	}
-	for _, r := range roles {
-		s, err := signer.NewLocalSigner(r.key.ToHex())
+	for _, k := range keys {
+		s, err := signer.NewLocalSigner(k.ToHex())
 		if err != nil {
-			return fmt.Errorf("create signer for %s: %w", r.name, err)
+			return fmt.Errorf("create signer: %w", err)
 		}
-		registry.Register(r.name, s)
+		registry.Register(s)
 	}
 
 	mgr := txn.NewManager(aptosClient, st, registry, 3, logger)

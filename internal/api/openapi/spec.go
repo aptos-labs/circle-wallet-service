@@ -397,8 +397,8 @@ func buildComponents() Components {
 					},
 					"signer": {
 						Type:        "string",
-						Description: "Name of the configured signer role to sign the transaction (e.g., minter, owner, denylister)",
-						Example:     "minter",
+						Description: "Aptos address of the signer account to use for this transaction. Must match a registered signer.",
+						Example:     "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
 					},
 					"max_gas_amount": {
 						Type:        "integer",

@@ -13,8 +13,8 @@ import (
 type Operation interface {
 	// Name returns the operation type identifier (e.g., "mint", "burn").
 	Name() string
-	// RequiredRole returns the account role needed to sign this operation.
-	RequiredRole() string
+	// SignerAddress returns the Aptos address of the account that signs this operation.
+	SignerAddress() string
 	// BuildPayload constructs the Aptos transaction payload.
 	BuildPayload() (aptossdk.TransactionPayload, error)
 	// RequestJSON returns the original request for audit logging.

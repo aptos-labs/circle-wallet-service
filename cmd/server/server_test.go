@@ -186,7 +186,7 @@ func TestBuildRouter_RecoveryMiddlewareActive(t *testing.T) {
 	// POST /v1/contracts/execute with valid JSON but nil manager should cause a panic
 	// that recovery middleware catches.
 	req := httptest.NewRequest(http.MethodPost, "/v1/contracts/execute",
-		strings.NewReader(`{"function_id":"0x1::mod::func","signer":"minter","arguments":[]}`))
+		strings.NewReader(`{"function_id":"0x1::mod::func","signer":"0x1","arguments":[]}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)

@@ -6,7 +6,7 @@ BIN_DIR := bin
 # Go module
 MODULE := github.com/aptos-labs/jc-contract-integration
 
-.PHONY: help build test test-race test-verbose vet lint fmt fmt-check run run-openapi openapi-yaml openapi-json check e2e smoke-test localnet-test clean circle-setup circle-wallets circle-demo
+.PHONY: help build test test-race test-verbose vet lint fmt fmt-check run check e2e smoke-test localnet-test example clean
 
 ## help: Show this help message (default target)
 help:
@@ -51,18 +51,6 @@ fmt-check:
 run: build
 	./$(BIN_DIR)/server
 
-## run-openapi: Print the OpenAPI spec (YAML) to stdout
-run-openapi:
-	go run ./cmd/openapi
-
-## openapi-yaml: Write the OpenAPI spec to openapi.yaml
-openapi-yaml:
-	go run ./cmd/openapi -o openapi.yaml
-
-## openapi-json: Write the OpenAPI spec to openapi.json
-openapi-json:
-	go run ./cmd/openapi -format json -o openapi.json
-
 ## check: Run all validations (fmt-check + vet + lint + test-race) — use before committing
 check: fmt-check vet lint test-race
 
@@ -79,18 +67,10 @@ smoke-test:
 localnet-test:
 	@./scripts/localnet-test.sh
 
+## example: Run the wrap-existing-contract example against a running server (set API_URL and API_KEY)
+example:
+	@./examples/wrap-existing-contract/demo.sh
+
 ## clean: Remove build artifacts
 clean:
 	rm -rf $(BIN_DIR)
-
-## circle-setup: Generate and register a Circle entity secret (run once per Circle account)
-circle-setup:
-	cd dev-controlled-wallets && node --env-file=../.env --import=tsx register-entity-secret.ts
-
-## circle-wallets: Create Circle wallets for all contract roles on Aptos testnet
-circle-wallets:
-	cd dev-controlled-wallets && node --env-file=../.env --import=tsx create-role-wallets.ts
-
-## circle-demo: Run the Circle wallet demo (create wallet, send USDC, verify balances)
-circle-demo:
-	cd dev-controlled-wallets && node --env-file=../.env --import=tsx create-wallet.ts

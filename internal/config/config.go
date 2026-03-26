@@ -1,12 +1,21 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
+
+// CircleWallet describes a single Circle wallet for signing.
+type CircleWallet struct {
+	WalletID  string `json:"wallet_id"`
+	Address   string `json:"address"`
+	PublicKey string `json:"public_key,omitempty"` // fetched from Circle if empty
+}
 
 // Config holds all application configuration loaded from environment variables.
 type Config struct {
@@ -22,35 +31,13 @@ type Config struct {
 	// Signer
 	SignerProvider string // "local" or "circle"
 
-	// Local signer keys (hex-encoded Ed25519 private keys)
-	MinterPrivateKey          string
-	DenylisterPrivateKey      string
-	MasterMinterPrivateKey    string
-	MetadataUpdaterPrivateKey string
-	OwnerPrivateKey           string
+	// Local signer keys (comma-separated hex-encoded Ed25519 private keys)
+	SignerKeys []string
 
 	// Circle signer
-	CircleAPIKey            string
-	CircleEntitySecret      string
-	MinterWalletID          string
-	DenylisterWalletID      string
-	MasterMinterWalletID    string
-	MetadataUpdaterWalletID string
-	OwnerWalletID           string
-
-	// Per-role public keys (required for Circle signer)
-	MinterPublicKey          string
-	DenylisterPublicKey      string
-	MasterMinterPublicKey    string
-	MetadataUpdaterPublicKey string
-	OwnerPublicKey           string
-
-	// Per-role addresses (required for Circle, derived for local)
-	MinterAddress          string
-	DenylisterAddress      string
-	MasterMinterAddress    string
-	MetadataUpdaterAddress string
-	OwnerAddress           string
+	CircleAPIKey       string
+	CircleEntitySecret string
+	CircleWallets      []CircleWallet
 
 	// SQLite
 	SQLitePath string
@@ -116,44 +103,45 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid RETRY_BACKOFF_MAX_SECONDS: %w", err)
 	}
 
+	// Parse signer keys: comma-separated private keys
+	var signerKeys []string
+	if raw := getEnv("SIGNERS", ""); raw != "" {
+		for _, k := range strings.Split(raw, ",") {
+			k = strings.TrimSpace(k)
+			if k != "" {
+				signerKeys = append(signerKeys, k)
+			}
+		}
+	}
+
+	// Parse Circle wallets: JSON array
+	var circleWallets []CircleWallet
+	if raw := getEnv("CIRCLE_WALLETS", ""); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &circleWallets); err != nil {
+			return nil, fmt.Errorf("invalid CIRCLE_WALLETS JSON: %w", err)
+		}
+	}
+
 	cfg := &Config{
-		ServerPort:                getEnv("SERVER_PORT", "8080"),
-		APIKey:                    getEnv("API_KEY", ""),
-		TestingMode:               getEnvBool("TESTING_MODE", false),
-		AptosNodeURL:              getEnv("APTOS_NODE_URL", "https://api.testnet.aptoslabs.com/v1"),
-		AptosChainID:              chainID,
-		SignerProvider:            getEnv("SIGNER_PROVIDER", "local"),
-		MinterPrivateKey:          getEnv("MINTER_PRIVATE_KEY", ""),
-		DenylisterPrivateKey:      getEnv("DENYLISTER_PRIVATE_KEY", ""),
-		MasterMinterPrivateKey:    getEnv("MASTER_MINTER_PRIVATE_KEY", ""),
-		MetadataUpdaterPrivateKey: getEnv("METADATA_UPDATER_PRIVATE_KEY", ""),
-		OwnerPrivateKey:           getEnv("OWNER_PRIVATE_KEY", ""),
-		CircleAPIKey:              getEnv("CIRCLE_API_KEY", ""),
-		CircleEntitySecret:        getEnv("CIRCLE_ENTITY_SECRET", ""),
-		MinterWalletID:            getEnv("MINTER_WALLET_ID", ""),
-		DenylisterWalletID:        getEnv("DENYLISTER_WALLET_ID", ""),
-		MasterMinterWalletID:      getEnv("MASTER_MINTER_WALLET_ID", ""),
-		MetadataUpdaterWalletID:   getEnv("METADATA_UPDATER_WALLET_ID", ""),
-		OwnerWalletID:             getEnv("OWNER_WALLET_ID", ""),
-		MinterPublicKey:           getEnv("MINTER_PUBLIC_KEY", ""),
-		DenylisterPublicKey:       getEnv("DENYLISTER_PUBLIC_KEY", ""),
-		MasterMinterPublicKey:     getEnv("MASTER_MINTER_PUBLIC_KEY", ""),
-		MetadataUpdaterPublicKey:  getEnv("METADATA_UPDATER_PUBLIC_KEY", ""),
-		OwnerPublicKey:            getEnv("OWNER_PUBLIC_KEY", ""),
-		MinterAddress:             getEnv("MINTER_ADDRESS", ""),
-		DenylisterAddress:         getEnv("DENYLISTER_ADDRESS", ""),
-		MasterMinterAddress:       getEnv("MASTER_MINTER_ADDRESS", ""),
-		MetadataUpdaterAddress:    getEnv("METADATA_UPDATER_ADDRESS", ""),
-		OwnerAddress:              getEnv("OWNER_ADDRESS", ""),
-		SQLitePath:                getEnv("SQLITE_PATH", "./contractInt.db"),
-		MaxRetries:                maxRetries,
-		PollIntervalSeconds:       pollInterval,
-		MaxBatchSize:              maxBatchSize,
-		MaxGasAmount:              maxGasAmount,
-		GasPerRecipient:           gasPerRecipient,
-		TxnExpirationSeconds:      txnExpiration,
-		RetryBackoffBaseSeconds:   backoffBase,
-		RetryBackoffMaxSeconds:    backoffMax,
+		ServerPort:              getEnv("SERVER_PORT", "8080"),
+		APIKey:                  getEnv("API_KEY", ""),
+		TestingMode:             getEnvBool("TESTING_MODE", false),
+		AptosNodeURL:            getEnv("APTOS_NODE_URL", "https://api.testnet.aptoslabs.com/v1"),
+		AptosChainID:            chainID,
+		SignerProvider:          getEnv("SIGNER_PROVIDER", "local"),
+		SignerKeys:              signerKeys,
+		CircleAPIKey:            getEnv("CIRCLE_API_KEY", ""),
+		CircleEntitySecret:      getEnv("CIRCLE_ENTITY_SECRET", ""),
+		CircleWallets:           circleWallets,
+		SQLitePath:              getEnv("SQLITE_PATH", "./contractInt.db"),
+		MaxRetries:              maxRetries,
+		PollIntervalSeconds:     pollInterval,
+		MaxBatchSize:            maxBatchSize,
+		MaxGasAmount:            maxGasAmount,
+		GasPerRecipient:         gasPerRecipient,
+		TxnExpirationSeconds:    txnExpiration,
+		RetryBackoffBaseSeconds: backoffBase,
+		RetryBackoffMaxSeconds:  backoffMax,
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -183,7 +171,7 @@ func (c *Config) validate() error {
 
 	switch c.SignerProvider {
 	case "local":
-		// At least one role key should be configured, but we don't enforce all
+		// Signers are optional — can be empty
 	case "circle":
 		if c.CircleAPIKey == "" {
 			return fmt.Errorf("CIRCLE_API_KEY is required when SIGNER_PROVIDER=circle")

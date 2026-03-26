@@ -45,10 +45,10 @@ curl -X POST http://localhost:8080/v1/contracts/execute \
   -H "Authorization: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "function_id": "0x1234::contractInt::mint",
+    "function_id": "0x1::aptos_account::transfer",
     "type_arguments": [],
-    "arguments": ["0x5678abcd...", "10000"],
-    "signer": "minter"
+    "arguments": ["0x5678abcd...", "1000"],
+    "signer": "owner"
   }'
 # → {"transaction_id": "550e8400-...", "status": "pending"}
 ```
@@ -60,11 +60,11 @@ curl -X POST http://localhost:8080/v1/contracts/query \
   -H "Authorization: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "function_id": "0x1234::contractInt::balance_of",
+    "function_id": "0x1::account::exists_at",
     "type_arguments": [],
     "arguments": ["0x5678abcd..."]
   }'
-# → {"result": ["10000"]}
+# → {"result": [true]}
 ```
 
 Arguments are **untyped** (strings, numbers, arrays) — the server resolves types from the on-chain module ABI and handles BCS serialization automatically.
@@ -105,39 +105,11 @@ make test
 | `make fmt`          | Format code with `gofumpt`                               |
 | `make check`        | Run all validations (fmt-check + vet + lint + test-race) |
 | `make run`          | Build and start the API server                           |
+| `make example`      | Run the wrap-existing-contract example (requires running server) |
 | `make e2e`          | Deploy contract to devnet and run end-to-end tests       |
 | `make smoke-test`   | Run curl-based smoke tests against a running server      |
 | `make localnet-test`| Start localnet, deploy, run full integration tests       |
-| `make openapi-yaml` | Write OpenAPI spec to `openapi.yaml`                     |
-| `make openapi-json` | Write OpenAPI spec to `openapi.json`                     |
 | `make clean`        | Remove build artifacts                                   |
-
-## Smart Contract
-
-The Move contract (`contracts/sources/contractInt.move`) implements:
-
-- **Fungible asset** with unlimited supply via Aptos `primary_fungible_store`
-- **Minter allowances** — master minter configures per-minter mint limits
-- **Denylist** — denylister can block addresses from receiving tokens
-- **Role-based access control** — owner, master minter, denylister, metadata updater
-- **Pause** — halts all minting and burning when activated
-
-### Contract Roles
-
-| Role                 | Permissions                                            |
-|----------------------|--------------------------------------------------------|
-| **Owner**            | Update master minter, denylister, and metadata updater |
-| **Master Minter**    | Configure/remove minters, adjust allowances            |
-| **Minter**           | Mint (up to allowance) and burn tokens                 |
-| **Denylister**       | Add/remove addresses from the denylist                 |
-| **Metadata Updater** | Update token name, symbol, icon, and project URI       |
-
-### Contract Testing
-
-```bash
-cd contracts
-aptos move test --dev
-```
 
 ## Signer Providers
 

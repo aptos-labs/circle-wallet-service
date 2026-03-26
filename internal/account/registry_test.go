@@ -22,9 +22,10 @@ func (s *stubSigner) Address() aptossdk.AccountAddress { return s.addr }
 func TestRegistry_RegisterAndGet(t *testing.T) {
 	reg := NewRegistry()
 	s := &stubSigner{addr: aptossdk.AccountAddress{1}}
-	reg.Register("minter", s)
+	reg.Register(s)
 
-	got, err := reg.Get("minter")
+	addr := s.Address()
+	got, err := reg.Get(addr.String())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -33,28 +34,30 @@ func TestRegistry_RegisterAndGet(t *testing.T) {
 	}
 }
 
-func TestRegistry_GetMissingRole(t *testing.T) {
+func TestRegistry_GetMissingAddress(t *testing.T) {
 	reg := NewRegistry()
 
-	_, err := reg.Get("nonexistent")
+	_, err := reg.Get("0x9999")
 	if err == nil {
-		t.Fatal("expected error for missing role")
+		t.Fatal("expected error for missing address")
 	}
 }
 
-func TestRegistry_OverwriteRole(t *testing.T) {
+func TestRegistry_OverwriteAddress(t *testing.T) {
 	reg := NewRegistry()
+	// Same address, two different signers — second should win
 	s1 := &stubSigner{addr: aptossdk.AccountAddress{1}}
-	s2 := &stubSigner{addr: aptossdk.AccountAddress{2}}
+	s2 := &stubSigner{addr: aptossdk.AccountAddress{1}}
 
-	reg.Register("minter", s1)
-	reg.Register("minter", s2)
+	reg.Register(s1)
+	reg.Register(s2)
 
-	got, err := reg.Get("minter")
+	addr := s1.Address()
+	got, err := reg.Get(addr.String())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.Address() != s2.addr {
-		t.Errorf("got address %v, want %v (latest registration)", got.Address(), s2.addr)
+	if got != s2 {
+		t.Errorf("expected latest registration to win")
 	}
 }

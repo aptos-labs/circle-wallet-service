@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aptos-labs/aptos-go-sdk/crypto"
 	"github.com/aptos-labs/jc-contract-integration/internal/account"
 	apiPkg "github.com/aptos-labs/jc-contract-integration/internal/api"
 	"github.com/aptos-labs/jc-contract-integration/internal/api/handler"
@@ -131,79 +130,34 @@ func run(logger *slog.Logger) error {
 func initRegistry(cfg *config.Config) (*account.Registry, error) {
 	registry := account.NewRegistry()
 
-	type roleKey struct {
-		role       string
-		privateKey string
-	}
-
-	roles := []roleKey{
-		{account.RoleMinter, cfg.MinterPrivateKey},
-		{account.RoleDenylister, cfg.DenylisterPrivateKey},
-		{account.RoleMasterMinter, cfg.MasterMinterPrivateKey},
-		{account.RoleMetadataUpdater, cfg.MetadataUpdaterPrivateKey},
-		{account.RoleOwner, cfg.OwnerPrivateKey},
-	}
-
 	switch cfg.SignerProvider {
 	case "local":
-		for _, rk := range roles {
-			if rk.privateKey == "" {
-				continue // Skip unconfigured roles
-			}
-			s, err := signer.NewLocalSigner(rk.privateKey)
+		for i, hexKey := range cfg.SignerKeys {
+			s, err := signer.NewLocalSigner(hexKey)
 			if err != nil {
-				return nil, fmt.Errorf("init local signer for %s: %w", rk.role, err)
+				return nil, fmt.Errorf("init local signer #%d: %w", i, err)
 			}
-			registry.Register(rk.role, s)
-		}
-		if cfg.TestingMode {
-			for _, rk := range roles {
-				if rk.privateKey != "" {
-					continue // Already configured by env var
-				}
-				key, err := crypto.GenerateEd25519PrivateKey()
-				if err != nil {
-					return nil, fmt.Errorf("generate test key for %s: %w", rk.role, err)
-				}
-				s, err := signer.NewLocalSigner(key.ToHex())
-				if err != nil {
-					return nil, fmt.Errorf("init test signer for %s: %w", rk.role, err)
-				}
-				registry.Register(rk.role, s)
-				addr := s.Address()
-				slog.Info("testing mode: generated ephemeral key", "role", rk.role, "address", addr.String())
-			}
+			registry.Register(s)
+			addr := s.Address()
+			slog.Info("registered local signer", "address", addr.String())
 		}
 	case "circle":
 		circleClient := signer.NewCircleClient(cfg.CircleAPIKey)
 
-		type circleRole struct {
-			role      string
-			walletID  string
-			address   string
-			publicKey string
-		}
-		circleRoles := []circleRole{
-			{account.RoleMinter, cfg.MinterWalletID, cfg.MinterAddress, cfg.MinterPublicKey},
-			{account.RoleDenylister, cfg.DenylisterWalletID, cfg.DenylisterAddress, cfg.DenylisterPublicKey},
-			{account.RoleMasterMinter, cfg.MasterMinterWalletID, cfg.MasterMinterAddress, cfg.MasterMinterPublicKey},
-			{account.RoleMetadataUpdater, cfg.MetadataUpdaterWalletID, cfg.MetadataUpdaterAddress, cfg.MetadataUpdaterPublicKey},
-			{account.RoleOwner, cfg.OwnerWalletID, cfg.OwnerAddress, cfg.OwnerPublicKey},
-		}
-		for _, cr := range circleRoles {
-			if cr.walletID == "" || cr.address == "" {
+		for _, cw := range cfg.CircleWallets {
+			if cw.WalletID == "" || cw.Address == "" {
 				continue
 			}
-			pubKeyHex := cr.publicKey
+			pubKeyHex := cw.PublicKey
 			if pubKeyHex == "" {
 				// Public key not configured — fetch it from Circle at startup.
-				walletResp, err := circleClient.GetWallet(context.Background(), cr.walletID)
+				walletResp, err := circleClient.GetWallet(context.Background(), cw.WalletID)
 				if err != nil {
-					return nil, fmt.Errorf("fetch public key for %s wallet: %w", cr.role, err)
+					return nil, fmt.Errorf("fetch public key for wallet %s: %w", cw.WalletID, err)
 				}
 				pubKeyHex = walletResp.Data.Wallet.InitialPublicKey
 				if pubKeyHex == "" {
-					return nil, fmt.Errorf("circle wallet %s has no initialPublicKey; set %s_PUBLIC_KEY manually", cr.walletID, strings.ToUpper(cr.role))
+					return nil, fmt.Errorf("circle wallet %s has no initialPublicKey; set public_key in CIRCLE_WALLETS", cw.WalletID)
 				}
 			}
 			if !strings.HasPrefix(pubKeyHex, "0x") {
@@ -211,15 +165,16 @@ func initRegistry(cfg *config.Config) (*account.Registry, error) {
 			}
 			s, err := signer.NewCircleSigner(
 				circleClient,
-				cr.walletID,
+				cw.WalletID,
 				cfg.CircleEntitySecret,
 				pubKeyHex,
-				cr.address,
+				cw.Address,
 			)
 			if err != nil {
-				return nil, fmt.Errorf("init circle signer for %s: %w", cr.role, err)
+				return nil, fmt.Errorf("init circle signer for wallet %s: %w", cw.WalletID, err)
 			}
-			registry.Register(cr.role, s)
+			registry.Register(s)
+			slog.Info("registered circle signer", "address", cw.Address, "wallet_id", cw.WalletID)
 		}
 	default:
 		return nil, fmt.Errorf("unknown signer provider: %q (expected \"local\" or \"circle\")", cfg.SignerProvider)

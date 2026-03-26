@@ -30,7 +30,7 @@ type executeOp struct {
 }
 
 func (o *executeOp) Name() string                                       { return "execute" }
-func (o *executeOp) RequiredRole() string                               { return o.signer }
+func (o *executeOp) SignerAddress() string                              { return o.signer }
 func (o *executeOp) BuildPayload() (aptossdk.TransactionPayload, error) { return o.payload, nil }
 func (o *executeOp) RequestJSON() []byte                                { return o.reqJSON }
 

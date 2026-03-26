@@ -52,8 +52,8 @@ func NewManager(
 
 // Submit executes the full transaction lifecycle for an operation and returns a tracking ID.
 func (m *Manager) Submit(ctx context.Context, op Operation) (string, error) {
-	// 1. Resolve role → signer
-	s, err := m.registry.Get(op.RequiredRole())
+	// 1. Resolve signer by address
+	s, err := m.registry.Get(op.SignerAddress())
 	if err != nil {
 		return "", fmt.Errorf("resolve signer: %w", err)
 	}
@@ -161,7 +161,7 @@ func (m *Manager) computeGas(op Operation) uint64 {
 
 // Resubmit rebuilds and submits an existing transaction record (for stuck transaction recovery).
 func (m *Manager) Resubmit(ctx context.Context, rec *store.TransactionRecord, op Operation) error {
-	s, err := m.registry.Get(op.RequiredRole())
+	s, err := m.registry.Get(op.SignerAddress())
 	if err != nil {
 		return fmt.Errorf("resolve signer: %w", err)
 	}

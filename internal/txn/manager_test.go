@@ -18,6 +18,14 @@ func newTestManager(client TxnClient, st store.Store, registry *account.Registry
 	return NewManager(client, st, registry, 3, 60, 100_000, 0, slog.Default())
 }
 
+// zeroAddr is the string form of AccountAddress{} used by mock signers.
+var zeroAddr string
+
+func init() {
+	a := aptossdk.AccountAddress{}
+	zeroAddr = a.String()
+}
+
 // setupHappyPath wires up a mock client, store, signer, and registry for the
 // standard success scenario. Returns the Manager and a pointer to the last
 // store record that was updated (captured via the update callback).
@@ -54,7 +62,7 @@ func setupHappyPath() (*Manager, *store.TransactionRecord) {
 	}
 
 	reg := account.NewRegistry()
-	reg.Register("minter", sig)
+	reg.Register(sig)
 
 	mgr := newTestManager(mc, ms, reg)
 	return mgr, &captured
@@ -63,7 +71,7 @@ func setupHappyPath() (*Manager, *store.TransactionRecord) {
 func TestSubmit_HappyPath(t *testing.T) {
 	mgr, captured := setupHappyPath()
 
-	op := &mockOperation{name: "mint", role: "minter", json: []byte(`{}`)}
+	op := &mockOperation{name: "mint", role: zeroAddr, json: []byte(`{}`)}
 
 	txnID, err := mgr.Submit(context.Background(), op)
 	if err != nil {
@@ -87,7 +95,7 @@ func TestSubmit_SignerResolveError(t *testing.T) {
 	reg := account.NewRegistry() // empty — no signers registered
 
 	mgr := newTestManager(mc, ms, reg)
-	op := &mockOperation{name: "mint", role: "minter", json: []byte(`{}`)}
+	op := &mockOperation{name: "mint", role: "0xdeadbeef", json: []byte(`{}`)}
 
 	txnID, err := mgr.Submit(context.Background(), op)
 	if err == nil {
@@ -111,12 +119,12 @@ func TestSubmit_PayloadBuildError(t *testing.T) {
 		addr:   aptossdk.AccountAddress{},
 	}
 	reg := account.NewRegistry()
-	reg.Register("minter", sig)
+	reg.Register(sig)
 
 	mgr := newTestManager(mc, ms, reg)
 	op := &mockOperation{
 		name: "mint",
-		role: "minter",
+		role: zeroAddr,
 		err:  errors.New("bad payload"),
 		json: []byte(`{}`),
 	}
@@ -147,10 +155,10 @@ func TestSubmit_BuildTxnError(t *testing.T) {
 		addr:   aptossdk.AccountAddress{},
 	}
 	reg := account.NewRegistry()
-	reg.Register("minter", sig)
+	reg.Register(sig)
 
 	mgr := newTestManager(mc, ms, reg)
-	op := &mockOperation{name: "mint", role: "minter", json: []byte(`{}`)}
+	op := &mockOperation{name: "mint", role: zeroAddr, json: []byte(`{}`)}
 
 	txnID, err := mgr.Submit(context.Background(), op)
 	if err == nil {
@@ -189,10 +197,10 @@ func TestSubmit_SignError(t *testing.T) {
 		addr:   aptossdk.AccountAddress{},
 	}
 	reg := account.NewRegistry()
-	reg.Register("minter", sig)
+	reg.Register(sig)
 
 	mgr := newTestManager(mc, ms, reg)
-	op := &mockOperation{name: "mint", role: "minter", json: []byte(`{}`)}
+	op := &mockOperation{name: "mint", role: zeroAddr, json: []byte(`{}`)}
 
 	txnID, err := mgr.Submit(context.Background(), op)
 	if err != nil {
@@ -237,10 +245,10 @@ func TestSubmit_SubmitError(t *testing.T) {
 		addr:   aptossdk.AccountAddress{},
 	}
 	reg := account.NewRegistry()
-	reg.Register("minter", sig)
+	reg.Register(sig)
 
 	mgr := newTestManager(mc, ms, reg)
-	op := &mockOperation{name: "mint", role: "minter", json: []byte(`{}`)}
+	op := &mockOperation{name: "mint", role: zeroAddr, json: []byte(`{}`)}
 
 	txnID, err := mgr.Submit(context.Background(), op)
 	if err != nil {
