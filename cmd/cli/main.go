@@ -1,4 +1,16 @@
-// cmd/cli is a simple CLI client for testing the contract integration API.
+// CLI for interacting with the Aptos Contract API server.
+//
+// Usage:
+//
+//	go run ./cmd/cli <command> [flags]
+//
+// Commands:
+//
+//	health                         Check server health
+//	query                          Call a view function
+//	execute                        Submit a transaction
+//	status <transaction_id>        Poll transaction status
+//	watch  <transaction_id>        Poll until terminal status
 package main
 
 import (
@@ -10,249 +22,346 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 func main() {
-	baseURL := flag.String("url", "http://localhost:8080", "API base URL")
-	flag.Parse()
+	_ = godotenv.Load()
 
-	args := flag.Args()
-	if len(args) == 0 {
+	if len(os.Args) < 2 {
 		usage()
 		os.Exit(1)
 	}
 
-	var err error
-	switch args[0] {
-	case "execute":
-		err = execute(*baseURL, args[1:])
-	case "query":
-		err = query(*baseURL, args[1:])
-	case "status":
-		err = status(*baseURL, args[1:])
-	case "poll":
-		err = poll(*baseURL, args[1:])
+	cmd := os.Args[1]
+	// Strip the command from os.Args so flag.Parse works on subcommand flags
+	os.Args = append(os.Args[:1], os.Args[2:]...)
+
+	switch cmd {
 	case "health":
-		err = health(*baseURL)
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
+		cmdHealth()
+	case "query":
+		cmdQuery()
+	case "execute":
+		cmdExecute()
+	case "status":
+		cmdStatus()
+	case "watch":
+		cmdWatch()
+	case "help", "-h", "--help":
 		usage()
-		os.Exit(1)
-	}
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", cmd)
+		usage()
 		os.Exit(1)
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `Usage: cli [flags] <command> [args]
+	fmt.Println(`Aptos Contract API CLI
+
+Usage: go run ./cmd/cli <command> [flags]
 
 Commands:
-  execute  -f <function_id> -s <signer_address> [-t type_arg]... [arg]...
-           Submit an entry function transaction (async).
+  health                           Check server health
+  query    -f <function_id> ...    Call a view function
+  execute  -w <wallet_id|address> -f <function_id> ...    Submit a transaction
+  status   -id <transaction_id>    Get transaction status
+  watch    -id <transaction_id>    Poll until terminal status
 
-  query    -f <function_id> [-t type_arg]... [arg]...
-           Call a view function (sync).
-
-  status   <transaction_id>
-           Get transaction status.
-
-  poll     <transaction_id> [-interval 2s] [-timeout 60s]
-           Poll until transaction completes or times out.
-
-  health   Check API health.
-
-Flags:
-  -url string   API base URL (default "http://localhost:8080")
+Global env vars:
+  API_BASE_URL    Server URL (default http://localhost:8080)
+  API_KEY         Auth key
 
 Examples:
-  cli execute -f 0x1::aptos_account::transfer -s 0xYOUR_SIGNER_ADDRESS 0xBOB 1000
-  cli query -f 0x1::coin::balance -t 0x1::aptos_coin::AptosCoin 0xALICE
-  cli poll abc-123-def
-  cli health`)
+  go run ./cmd/cli health
+
+  go run ./cmd/cli query \
+    -f "0x1::coin::balance" \
+    -t "0x1::aptos_coin::AptosCoin" \
+    -a "0xYOUR_ADDRESS"
+
+  go run ./cmd/cli execute \
+    -w "circle-wallet-uuid-or-0xADDRESS" \
+    -f "0x1::aptos_account::transfer" \
+    -a "0xRECIPIENT" -a "100"
+
+  go run ./cmd/cli watch -id "transaction-uuid"`)
 }
 
-func execute(baseURL string, args []string) error {
-	fs := flag.NewFlagSet("execute", flag.ExitOnError)
-	funcID := fs.String("f", "", "function_id (required)")
-	signer := fs.String("s", "", "signer address (required)")
-	gas := fs.Uint64("gas", 0, "max_gas_amount (0 = default)")
-	var typeArgs multiFlag
-	fs.Var(&typeArgs, "t", "type argument (repeatable)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
+// --- helpers ---
 
-	if *funcID == "" {
-		return fmt.Errorf("-f function_id is required")
+func baseURL() string {
+	if v := os.Getenv("API_BASE_URL"); v != "" {
+		return v
 	}
-	if *signer == "" {
-		return fmt.Errorf("-s signer address is required")
-	}
-
-	fnArgs := make([]any, len(fs.Args()))
-	for i, a := range fs.Args() {
-		fnArgs[i] = a
-	}
-
-	body := map[string]any{
-		"function_id":    *funcID,
-		"type_arguments": typeArgs,
-		"arguments":      fnArgs,
-		"signer":         *signer,
-	}
-	if *gas > 0 {
-		body["max_gas_amount"] = *gas
-	}
-
-	return doPost(baseURL+"/v1/contracts/execute", body)
+	return "http://localhost:8080"
 }
 
-func query(baseURL string, args []string) error {
-	fs := flag.NewFlagSet("query", flag.ExitOnError)
-	funcID := fs.String("f", "", "function_id (required)")
-	var typeArgs multiFlag
-	fs.Var(&typeArgs, "t", "type argument (repeatable)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	if *funcID == "" {
-		return fmt.Errorf("-f function_id is required")
-	}
-
-	fnArgs := make([]any, len(fs.Args()))
-	for i, a := range fs.Args() {
-		fnArgs[i] = a
-	}
-
-	body := map[string]any{
-		"function_id":    *funcID,
-		"type_arguments": typeArgs,
-		"arguments":      fnArgs,
-	}
-
-	return doPost(baseURL+"/v1/contracts/query", body)
+func apiKey() string {
+	return os.Getenv("API_KEY")
 }
 
-func status(baseURL string, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("transaction_id is required")
-	}
-	return doGet(baseURL + "/v1/transactions/" + args[0])
-}
-
-func poll(baseURL string, args []string) error {
-	fs := flag.NewFlagSet("poll", flag.ExitOnError)
-	interval := fs.Duration("interval", 2*time.Second, "poll interval")
-	timeout := fs.Duration("timeout", 60*time.Second, "poll timeout")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if len(fs.Args()) == 0 {
-		return fmt.Errorf("transaction_id is required")
-	}
-	txnID := fs.Args()[0]
-	url := baseURL + "/v1/transactions/" + txnID
-
-	deadline := time.After(*timeout)
-	tick := time.NewTicker(*interval)
-	defer tick.Stop()
-
-	fmt.Fprintf(os.Stderr, "polling %s every %s (timeout %s)...\n", txnID, *interval, *timeout)
-
-	for {
-		body, code, err := httpGet(url)
+func doRequest(method, path string, body any) (int, []byte) {
+	var bodyReader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
 		if err != nil {
-			return err
+			fatal("marshal request: %v", err)
 		}
-
-		var rec map[string]any
-		if err := json.Unmarshal(body, &rec); err == nil {
-			s, _ := rec["status"].(string)
-			fmt.Fprintf(os.Stderr, "  status: %s\n", s)
-			if s == "confirmed" || s == "failed" || code == http.StatusNotFound {
-				prettyPrint(body)
-				return nil
-			}
-		}
-
-		select {
-		case <-deadline:
-			fmt.Fprintln(os.Stderr, "timeout reached, last response:")
-			prettyPrint(body)
-			return fmt.Errorf("poll timed out after %s", *timeout)
-		case <-tick.C:
-		}
+		bodyReader = bytes.NewReader(b)
 	}
-}
 
-func health(baseURL string) error {
-	return doGet(baseURL + "/v1/health")
-}
-
-// --- HTTP helpers ---
-
-func doPost(url string, body any) error {
-	data, err := json.Marshal(body)
+	req, err := http.NewRequest(method, baseURL()+path, bodyReader)
 	if err != nil {
-		return err
+		fatal("create request: %v", err)
 	}
-	fmt.Fprintf(os.Stderr, "POST %s\n", url)
-	fmt.Fprintf(os.Stderr, ">>> %s\n", string(data))
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if key := apiKey(); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
 
-	resp, err := http.Post(url, "application/json", bytes.NewReader(data))
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		fatal("request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		_ = Body.Close()
+	}(resp.Body)
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		fatal("read response: %v", err)
 	}
-	fmt.Fprintf(os.Stderr, "<<< %d\n", resp.StatusCode)
-	prettyPrint(respBody)
-	return nil
-}
-
-func doGet(url string) error {
-	fmt.Fprintf(os.Stderr, "GET %s\n", url)
-	body, code, err := httpGet(url)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "<<< %d\n", code)
-	prettyPrint(body)
-	return nil
-}
-
-func httpGet(url string) ([]byte, int, error) {
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	return body, resp.StatusCode, err
+	return resp.StatusCode, respBody
 }
 
 func prettyPrint(data []byte) {
-	var buf bytes.Buffer
-	if json.Indent(&buf, data, "", "  ") == nil {
-		fmt.Println(buf.String())
-	} else {
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
 		fmt.Println(string(data))
+		return
+	}
+	out, _ := json.MarshalIndent(v, "", "  ")
+	fmt.Println(string(out))
+}
+
+func fatal(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
+	os.Exit(1)
+}
+
+// --- array flag for repeated -a / -t values ---
+
+type stringSlice []string
+
+func (s *stringSlice) String() string { return fmt.Sprintf("%v", *s) }
+func (s *stringSlice) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+// --- commands ---
+
+func cmdHealth() {
+	status, body := doRequest("GET", "/v1/health", nil)
+	fmt.Printf("HTTP %d\n", status)
+	prettyPrint(body)
+}
+
+func cmdQuery() {
+	var functionID string
+	var typeArgs stringSlice
+	var args stringSlice
+
+	fs := flag.NewFlagSet("query", flag.ExitOnError)
+	fs.StringVar(&functionID, "f", "", "function_id (e.g. 0x1::coin::balance)")
+	fs.Var(&typeArgs, "t", "type argument (repeatable)")
+	fs.Var(&args, "a", "argument (repeatable)")
+	err := fs.Parse(os.Args[1:])
+	if err != nil {
+		os.Exit(1)
+	}
+
+	if functionID == "" {
+		_, err2 := fmt.Fprintln(os.Stderr, "Error: -f (function_id) is required")
+		if err2 != nil {
+			os.Exit(1)
+		}
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	// Convert string args to []any for JSON
+	anyArgs := make([]any, len(args))
+	for i, a := range args {
+		anyArgs[i] = a
+	}
+
+	reqBody := map[string]any{
+		"function_id":    functionID,
+		"type_arguments": []string(typeArgs),
+		"arguments":      anyArgs,
+	}
+
+	status, body := doRequest("POST", "/v1/query", reqBody)
+	fmt.Printf("HTTP %d\n", status)
+	prettyPrint(body)
+}
+
+func cmdExecute() {
+	var walletID, functionID, webhookURL string
+	var typeArgs stringSlice
+	var args stringSlice
+	var maxGas uint64
+
+	fs := flag.NewFlagSet("execute", flag.ExitOnError)
+	fs.StringVar(&walletID, "w", "", "wallet_id or Aptos address")
+	fs.StringVar(&functionID, "f", "", "function_id (e.g. 0x1::aptos_account::transfer)")
+	fs.Var(&typeArgs, "t", "type argument (repeatable)")
+	fs.Var(&args, "a", "argument (repeatable)")
+	fs.Uint64Var(&maxGas, "gas", 0, "max gas amount (0 = server default)")
+	fs.StringVar(&webhookURL, "webhook", "", "webhook URL for status callback")
+	err := fs.Parse(os.Args[1:])
+	if err != nil {
+		os.Exit(1)
+	}
+
+	if walletID == "" || functionID == "" {
+		_, err2 := fmt.Fprintln(os.Stderr, "Error: -w (wallet_id) and -f (function_id) are required")
+		if err2 != nil {
+			os.Exit(1)
+		}
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	anyArgs := make([]any, len(args))
+	for i, a := range args {
+		anyArgs[i] = a
+	}
+
+	reqBody := map[string]any{
+		"wallet_id":      walletID,
+		"function_id":    functionID,
+		"type_arguments": []string(typeArgs),
+		"arguments":      anyArgs,
+	}
+	if maxGas > 0 {
+		reqBody["max_gas_amount"] = maxGas
+	}
+	if webhookURL != "" {
+		reqBody["webhook_url"] = webhookURL
+	}
+
+	status, body := doRequest("POST", "/v1/execute", reqBody)
+	fmt.Printf("HTTP %d\n", status)
+	prettyPrint(body)
+
+	// If successful, offer to watch
+	if status == 202 {
+		var resp struct {
+			TransactionID string `json:"transaction_id"`
+		}
+		if json.Unmarshal(body, &resp) == nil && resp.TransactionID != "" {
+			fmt.Printf("\nPoll with:  go run ./cmd/cli watch -id %s\n", resp.TransactionID)
+		}
 	}
 }
 
-// multiFlag collects repeated -t flags into a string slice.
-type multiFlag []string
+func cmdStatus() {
+	var txnID string
 
-func (m *multiFlag) String() string { return fmt.Sprintf("%v", *m) }
-func (m *multiFlag) Set(val string) error {
-	*m = append(*m, val)
-	return nil
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	fs.StringVar(&txnID, "id", "", "transaction ID")
+	err := fs.Parse(os.Args[1:])
+	if err != nil {
+		os.Exit(1)
+	}
+
+	if txnID == "" {
+		_, err := fmt.Fprintln(os.Stderr, "Error: -id (transaction ID) is required")
+		if err != nil {
+			os.Exit(1)
+		}
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	status, body := doRequest("GET", "/v1/transactions/"+txnID, nil)
+	fmt.Printf("HTTP %d\n", status)
+	prettyPrint(body)
+}
+
+func cmdWatch() {
+	var txnID string
+	var interval int
+
+	fs := flag.NewFlagSet("watch", flag.ExitOnError)
+	fs.StringVar(&txnID, "id", "", "transaction ID")
+	fs.IntVar(&interval, "interval", 5, "poll interval in seconds")
+	err := fs.Parse(os.Args[1:])
+	if err != nil {
+		os.Exit(1)
+	}
+
+	if txnID == "" {
+		_, err := fmt.Fprintln(os.Stderr, "Error: -id (transaction ID) is required")
+		if err != nil {
+			os.Exit(1)
+		}
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	fmt.Printf("Watching transaction %s (every %ds)...\n\n", txnID, interval)
+
+	for i := range 60 {
+		if i > 0 {
+			time.Sleep(time.Duration(interval) * time.Second)
+		}
+
+		status, body := doRequest("GET", "/v1/transactions/"+txnID, nil)
+		if status == 404 {
+			fmt.Printf("  [%s] not found (may have been evicted)\n", time.Now().Format("15:04:05"))
+			return
+		}
+
+		var resp struct {
+			Status       string `json:"status"`
+			TxnHash      string `json:"txn_hash"`
+			ErrorMessage string `json:"error_message"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			fmt.Printf("  [%s] HTTP %d — parse error: %v\n", time.Now().Format("15:04:05"), status, err)
+			continue
+		}
+
+		fmt.Printf("  [%s] status=%s", time.Now().Format("15:04:05"), resp.Status)
+		if resp.TxnHash != "" {
+			fmt.Printf("  hash=%s", resp.TxnHash)
+		}
+		if resp.ErrorMessage != "" {
+			fmt.Printf("  error=%s", resp.ErrorMessage)
+		}
+		fmt.Println()
+
+		switch resp.Status {
+		case "confirmed":
+			fmt.Println("\nTransaction confirmed!")
+			return
+		case "failed":
+			fmt.Printf("\nTransaction failed: %s\n", resp.ErrorMessage)
+			os.Exit(1)
+		case "expired":
+			fmt.Println("\nTransaction expired.")
+			os.Exit(1)
+		}
+	}
+
+	fmt.Println("\nTimed out waiting for terminal status.")
+	os.Exit(1)
 }

@@ -1,39 +1,33 @@
 package aptos
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"strings"
 	"sync"
+
+	"github.com/aptos-labs/aptos-go-sdk"
 )
 
-// ABICache fetches and caches module ABIs from an Aptos node.
-// Safe for concurrent use.
+// ABICache cahces the ABI so it can be looked up quickly without a lot of API calls
 type ABICache struct {
 	mu      sync.RWMutex
-	modules map[string]*moduleABI // keyed by "addr::module"
-	nodeURL string
-	client  *http.Client
+	modules map[string]*moduleABI
+	client  aptos.AptosRpcClient
 }
 
-// moduleABI stores the parsed function signatures for a single module.
+// moduleABI is the definition of a module, but only the Functions matter for this case
 type moduleABI struct {
-	Functions map[string][]string // function name → param type strings (signer params stripped)
+	Functions map[string][]string
 }
 
-// NewABICache creates a new ABI cache that fetches from the given Aptos node URL.
-func NewABICache(nodeURL string) *ABICache {
+// NewABICache initializes the ABICache
+func NewABICache(client aptos.AptosRpcClient) *ABICache {
 	return &ABICache{
 		modules: make(map[string]*moduleABI),
-		nodeURL: strings.TrimRight(nodeURL, "/"),
-		client:  &http.Client{},
+		client:  client,
 	}
 }
 
-// GetFunctionParams returns the non-signer parameter type strings for the given entry function.
-// Results are cached per module for the server's lifetime.
+// GetFunctionParams gets all the function parameters from the ABI, going through the cache
 func (c *ABICache) GetFunctionParams(addr, module, function string) ([]string, error) {
 	key := addr + "::" + module
 	c.mu.RLock()
@@ -42,20 +36,17 @@ func (c *ABICache) GetFunctionParams(addr, module, function string) ([]string, e
 	if ok {
 		return mod.lookupFunction(function)
 	}
-
-	// Cache miss — fetch the module ABI from the node.
 	mod, err := c.fetchModule(addr, module)
 	if err != nil {
 		return nil, err
 	}
-
 	c.mu.Lock()
 	c.modules[key] = mod
 	c.mu.Unlock()
-
 	return mod.lookupFunction(function)
 }
 
+// lookupFunction searches for the function in the module
 func (m *moduleABI) lookupFunction(name string) ([]string, error) {
 	params, ok := m.Functions[name]
 	if !ok {
@@ -64,49 +55,22 @@ func (m *moduleABI) lookupFunction(name string) ([]string, error) {
 	return params, nil
 }
 
-// fetchModule retrieves the module ABI from the Aptos node REST API.
 func (c *ABICache) fetchModule(addr, module string) (*moduleABI, error) {
-	url := fmt.Sprintf("%s/accounts/%s/module/%s", c.nodeURL, addr, module)
-	resp, err := c.client.Get(url)
+	// Load the account address
+	address := aptos.AccountAddress{}
+	err := address.ParseStringRelaxed(addr)
+	if err != nil {
+		return nil, err
+	}
+	moduleData, err := c.client.AccountModule(address, module)
 	if err != nil {
 		return nil, fmt.Errorf("fetch module ABI: %w", err)
 	}
-	defer func(Body io.ReadCloser) {
-		_ = Body.Close()
-	}(resp.Body)
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("fetch module ABI: HTTP %d: %s", resp.StatusCode, string(body))
-	}
+	mod := &moduleABI{Functions: make(map[string][]string)}
 
-	var result struct {
-		ABI struct {
-			ExposedFunctions []struct {
-				Name              string   `json:"name"`
-				Params            []string `json:"params"`
-				IsEntry           bool     `json:"is_entry"`
-				IsView            bool     `json:"is_view"`
-				GenericTypeParams []struct {
-					Constraints []string `json:"constraints"`
-				} `json:"generic_type_params"`
-			} `json:"exposed_functions"`
-		} `json:"abi"`
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read module ABI response: %w", err)
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("parse module ABI: %w", err)
-	}
-
-	mod := &moduleABI{
-		Functions: make(map[string][]string),
-	}
-	for _, fn := range result.ABI.ExposedFunctions {
-		// Strip &signer params — they are filled by the transaction sender
+	// Cut out all the unnecessary parts
+	for _, fn := range moduleData.Abi.ExposedFunctions {
 		var params []string
 		for _, p := range fn.Params {
 			if p == "&signer" || p == "signer" {
@@ -116,6 +80,5 @@ func (c *ABICache) fetchModule(addr, module string) (*moduleABI, error) {
 		}
 		mod.Functions[fn.Name] = params
 	}
-
 	return mod, nil
 }

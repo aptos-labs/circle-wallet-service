@@ -10,24 +10,29 @@ import (
 	"github.com/aptos-labs/aptos-go-sdk/bcs"
 )
 
-// ParseFunctionID splits "0x1234::module::function" into its three components.
 func ParseFunctionID(s string) (addr, module, function string, err error) {
 	parts := strings.Split(s, "::")
 	if len(parts) != 3 {
-		return "", "", "", fmt.Errorf("invalid function_id %q: expected format addr::module::function", s)
+		return "", "", "", fmt.Errorf("invalid function_id %q: expected addr::module::function", s)
 	}
 	addr, module, function = parts[0], parts[1], parts[2]
 	if addr == "" || module == "" || function == "" {
 		return "", "", "", fmt.Errorf("invalid function_id %q: empty component", s)
 	}
-	// Validate the address is parseable.
 	if _, err := ParseAddress(addr); err != nil {
 		return "", "", "", fmt.Errorf("invalid function_id address %q: %w", addr, err)
 	}
 	return addr, module, function, nil
 }
 
-// SerializeArgument serializes a JSON-decoded value to BCS bytes based on the Move type string.
+func ParseAddress(s string) (aptossdk.AccountAddress, error) {
+	var addr aptossdk.AccountAddress
+	if err := addr.ParseStringRelaxed(s); err != nil {
+		return aptossdk.AccountAddress{}, fmt.Errorf("invalid address %q: %w", s, err)
+	}
+	return addr, nil
+}
+
 func SerializeArgument(typeStr string, value any) ([]byte, error) {
 	switch {
 	case typeStr == "address" || strings.HasPrefix(typeStr, "0x1::object::Object"):
@@ -55,31 +60,20 @@ func SerializeArgument(typeStr string, value any) ([]byte, error) {
 	}
 }
 
-// ParseTypeTags parses a list of type argument strings into TypeTags.
 func ParseTypeTags(tags []string) ([]aptossdk.TypeTag, error) {
 	result := make([]aptossdk.TypeTag, len(tags))
 	for i, s := range tags {
-		tag, err := parseTypeTag(s)
+		tag, err := aptossdk.ParseTypeTag(s)
 		if err != nil {
 			return nil, fmt.Errorf("type_arguments[%d]: %w", i, err)
 		}
-		result[i] = tag
+		result[i] = *tag
 	}
 	return result, nil
 }
 
-func parseTypeTag(s string) (aptossdk.TypeTag, error) {
-	tag, err := aptossdk.ParseTypeTag(s)
-	if err != nil {
-		return aptossdk.TypeTag{}, err
-	}
-	return *tag, nil
-}
-
-// --- serialization helpers ---
-
 func serializeAddress(value any) ([]byte, error) {
-	s, ok := toString(value)
+	s, ok := value.(string)
 	if !ok {
 		return nil, fmt.Errorf("address: expected string, got %T", value)
 	}
@@ -103,7 +97,6 @@ func serializeUint(value any, bits int) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("u%d: %w", bits, err)
 	}
-
 	var maxVal uint64
 	switch bits {
 	case 8:
@@ -118,7 +111,6 @@ func serializeUint(value any, bits int) ([]byte, error) {
 	if bits < 64 && n > maxVal {
 		return nil, fmt.Errorf("u%d: value %d exceeds max %d", bits, n, maxVal)
 	}
-
 	return bcs.SerializeSingle(func(ser *bcs.Serializer) {
 		switch bits {
 		case 8:
@@ -142,9 +134,7 @@ func serializeU128(value any) ([]byte, error) {
 	if n.Sign() < 0 || n.Cmp(max) > 0 {
 		return nil, fmt.Errorf("u128: value out of range")
 	}
-	return bcs.SerializeSingle(func(ser *bcs.Serializer) {
-		ser.U128(*n)
-	})
+	return bcs.SerializeSingle(func(ser *bcs.Serializer) { ser.U128(*n) })
 }
 
 func serializeU256(value any) ([]byte, error) {
@@ -156,13 +146,11 @@ func serializeU256(value any) ([]byte, error) {
 	if n.Sign() < 0 || n.Cmp(max) > 0 {
 		return nil, fmt.Errorf("u256: value out of range")
 	}
-	return bcs.SerializeSingle(func(ser *bcs.Serializer) {
-		ser.U256(*n)
-	})
+	return bcs.SerializeSingle(func(ser *bcs.Serializer) { ser.U256(*n) })
 }
 
 func serializeString(value any) ([]byte, error) {
-	s, ok := toString(value)
+	s, ok := value.(string)
 	if !ok {
 		return nil, fmt.Errorf("string: expected string, got %T", value)
 	}
@@ -170,15 +158,11 @@ func serializeString(value any) ([]byte, error) {
 }
 
 func serializeVector(typeStr string, value any) ([]byte, error) {
-	// Extract inner type: vector<T>
 	inner := typeStr[len("vector<") : len(typeStr)-1]
-
 	arr, ok := value.([]any)
 	if !ok {
 		return nil, fmt.Errorf("vector: expected array, got %T", value)
 	}
-
-	// Serialize each element, then wrap in BCS vector (length-prefix + concat).
 	serialized := make([][]byte, len(arr))
 	for i, elem := range arr {
 		b, err := SerializeArgument(inner, elem)
@@ -187,7 +171,6 @@ func serializeVector(typeStr string, value any) ([]byte, error) {
 		}
 		serialized[i] = b
 	}
-
 	return bcs.SerializeSingle(func(ser *bcs.Serializer) {
 		ser.Uleb128(uint32(len(serialized)))
 		for _, b := range serialized {
@@ -196,14 +179,6 @@ func serializeVector(typeStr string, value any) ([]byte, error) {
 	})
 }
 
-// --- value conversion helpers ---
-
-func toString(v any) (string, bool) {
-	s, ok := v.(string)
-	return s, ok
-}
-
-// toUint64 converts a JSON number (float64) or string to uint64.
 func toUint64(v any) (uint64, error) {
 	switch n := v.(type) {
 	case float64:
@@ -225,7 +200,6 @@ func toUint64(v any) (uint64, error) {
 	}
 }
 
-// toBigInt converts a JSON number (float64) or string to *big.Int.
 func toBigInt(v any) (*big.Int, error) {
 	switch n := v.(type) {
 	case float64:

@@ -1,35 +1,49 @@
-# Contract API — build, test, lint, format, run
+.PHONY: help build run cli test test-e2e test-all vet lint fmt check clean create-wallets
 
-# Default binary output directory
-BIN_DIR := bin
+.DEFAULT_GOAL := help
 
-# Go module
-MODULE := github.com/aptos-labs/jc-contract-integration
-
-.PHONY: help build test test-race test-verbose vet lint fmt fmt-check run check e2e smoke-test localnet-test example clean
-
-## help: Show this help message (default target)
+## help: Show this help message
 help:
-	@echo "Usage: make [target]"
+	@echo "Aptos Contract API (Rewrite)"
+	@echo ""
+	@echo "Usage: make <target>"
 	@echo ""
 	@sed -n 's/^## //p' $(MAKEFILE_LIST) | column -t -s ':'
+	@echo ""
+	@echo "Getting started:"
+	@echo "  1. cp .env.example .env      # configure credentials"
+	@echo "  2. make create-wallets        # create Circle wallets"
+	@echo "  3. Fund wallet on testnet     # https://aptos.dev/en/network/faucet"
+	@echo "  4. make run                   # start the server"
+	@echo "  5. make test-e2e              # run e2e tests (in another terminal)"
 
-## build: Compile server and openapi binaries into bin/
+## build: Build server and CLI binaries to bin/
 build:
-	go build -o $(BIN_DIR)/server ./cmd/server
-	go build -o $(BIN_DIR)/openapi ./cmd/openapi
+	go build -o bin/server ./cmd/server
+	go build -o bin/cli ./cmd/cli
 
-## test: Run all tests
+## run: Run the server (loads .env automatically)
+run:
+	go run ./cmd/server
+
+## cli: Run the CLI (pass ARGS, e.g. make cli ARGS="health")
+cli:
+	go run ./cmd/cli $(ARGS)
+
+## test: Run unit tests
 test:
-	go test ./...
+	go test ./internal/... -v
 
-## test-race: Run all tests with race detector
-test-race:
-	go test -race -count=1 ./...
+## test-e2e: Run e2e tests (requires server running)
+test-e2e:
+	go test ./examples/ -v -count=1
 
-## test-verbose: Run all tests with verbose output
-test-verbose:
-	go test -race -count=1 -v ./...
+## test-all: Run unit + e2e tests
+test-all: test test-e2e
+
+## fmt: Format code with gofumpt
+fmt:
+	gofumpt -w .
 
 ## vet: Run go vet
 vet:
@@ -39,38 +53,13 @@ vet:
 lint:
 	golangci-lint run ./...
 
-## fmt: Format code with gofumpt
-fmt:
-	gofumpt -w .
+## check: Format + vet + lint + unit tests
+check: fmt vet lint test
 
-## fmt-check: Check formatting without modifying files (useful in CI)
-fmt-check:
-	@test -z "$$(gofumpt -l .)" || { echo "Files need formatting:"; gofumpt -l .; exit 1; }
-
-## run: Start the API server
-run: build
-	./$(BIN_DIR)/server
-
-## check: Run all validations (fmt-check + vet + lint + test-race) — use before committing
-check: fmt-check vet lint test-race
-
-## e2e: Deploy contract to devnet and run full end-to-end tests (requires aptos CLI)
-e2e:
-	@command -v aptos >/dev/null 2>&1 || { echo "Error: aptos CLI not found. Install from https://aptos.dev/tools/aptos-cli"; exit 1; }
-	go test -tags=e2e -v -count=1 -timeout 10m ./e2e
-
-## smoke-test: Run curl-based smoke tests against a running server (set BASE_URL and API_KEY)
-smoke-test:
-	@./scripts/smoke-test.sh
-
-## localnet-test: Start localnet, deploy contract, run full integration tests (requires aptos CLI)
-localnet-test:
-	@./scripts/localnet-test.sh
-
-## example: Run the wrap-existing-contract example against a running server (set API_URL and API_KEY)
-example:
-	@./examples/wrap-existing-contract/demo.sh
+## create-wallets: Create Circle wallets on Aptos testnet
+create-wallets:
+	go run ./examples/create_wallets -count 1
 
 ## clean: Remove build artifacts
 clean:
-	rm -rf $(BIN_DIR)
+	rm -rf bin/
