@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/aptos-labs/aptos-go-sdk"
+	"github.com/aptos-labs/aptos-go-sdk/crypto"
 	"github.com/joho/godotenv"
 )
 
@@ -15,6 +17,30 @@ type CircleWallet struct {
 	WalletID  string `json:"wallet_id"`
 	Address   string `json:"address"`
 	PublicKey string `json:"public_key"`
+}
+
+func (wallet *CircleWallet) VerifyWallet() error {
+	// Verify address
+	address := &aptos.AccountAddress{}
+	err := address.ParseStringRelaxed(wallet.Address)
+	if err != nil {
+		return fmt.Errorf("failed to load wallet address %w", err)
+	}
+
+	// Validate and public key for sender (this prevents INVALID_SIGNATURE)
+	pubKey := crypto.Ed25519PublicKey{}
+	err = pubKey.FromHex(wallet.PublicKey)
+	if err != nil {
+		return fmt.Errorf("failed to load wallet public key %w", err)
+	}
+
+	addressStr := address.StringLong()
+	authkeyStr := pubKey.AuthKey().ToHex()
+
+	if addressStr != authkeyStr {
+		return fmt.Errorf("address != authkey %s : %s", addressStr, authkeyStr)
+	}
+	return nil
 }
 
 // Config holds all application configuration.
@@ -53,6 +79,12 @@ func Load() (*Config, error) {
 	if walletsJSON != "" {
 		if err := json.Unmarshal([]byte(walletsJSON), &wallets); err != nil {
 			return nil, fmt.Errorf("parsing CIRCLE_WALLETS: %w", err)
+		}
+		for i, wallet := range wallets {
+			err := wallet.VerifyWallet()
+			if err != nil {
+				return nil, fmt.Errorf("failed to load wallet %d: %w", i, err)
+			}
 		}
 	}
 

@@ -10,17 +10,20 @@ import (
 	"github.com/aptos-labs/aptos-go-sdk/bcs"
 )
 
-func ParseFunctionID(s string) (addr, module, function string, err error) {
+func ParseFunctionID(s string) (addr *aptossdk.AccountAddress, module, function string, err error) {
 	parts := strings.Split(s, "::")
 	if len(parts) != 3 {
-		return "", "", "", fmt.Errorf("invalid function_id %q: expected addr::module::function", s)
+		return nil, "", "", fmt.Errorf("invalid function_id %q: expected addr::module::function", s)
 	}
-	addr, module, function = parts[0], parts[1], parts[2]
-	if addr == "" || module == "" || function == "" {
-		return "", "", "", fmt.Errorf("invalid function_id %q: empty component", s)
+	addrStr, module, function := parts[0], parts[1], parts[2]
+	if addrStr == "" || module == "" || function == "" {
+		return nil, "", "", fmt.Errorf("invalid function_id %q: empty component", s)
 	}
-	if _, err := ParseAddress(addr); err != nil {
-		return "", "", "", fmt.Errorf("invalid function_id address %q: %w", addr, err)
+
+	addr = &aptossdk.AccountAddress{}
+	err = addr.ParseStringRelaxed(addrStr)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("invalid function_id address %q: %w", addr, err)
 	}
 	return addr, module, function, nil
 }

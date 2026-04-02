@@ -2,8 +2,6 @@ package aptos
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,29 +35,19 @@ func NewClient(nodeURL string, chainID uint8, expirationSec int64, maxGasAmount 
 	}, nil
 }
 
-// BuildTransaction builds an orderless transaction wrapped as fee-payer
+// BuildTransaction builds an transaction wrapped as fee-payer
 // (sender = fee-payer = senderAddr). Returns the RawTransactionWithData for signing.
 func (c *Client) BuildTransaction(
 	senderAddr aptossdk.AccountAddress,
 	payload aptossdk.TransactionPayload,
 	maxGasAmount uint64,
 ) (*aptossdk.RawTransaction, error) {
-
-	ef, ok := payload.Payload.(*aptossdk.EntryFunction)
-	if !ok {
-		return nil, fmt.Errorf("payload must be EntryFunction, got %T", payload.Payload)
-	}
-
-	orderlessPayload := aptossdk.TransactionPayload{
-		Payload: ef,
-	}
-
 	gas := c.maxGasAmount
 	if maxGasAmount > 0 {
 		gas = maxGasAmount
 	}
 
-	rawTxn, err := c.Inner.BuildTransaction(senderAddr, orderlessPayload,
+	rawTxn, err := c.Inner.BuildTransaction(senderAddr, payload,
 		aptossdk.ExpirationSeconds(c.expirationSec),
 		aptossdk.MaxGasAmount(gas),
 	)
@@ -70,30 +58,21 @@ func (c *Client) BuildTransaction(
 	return rawTxn, nil
 }
 
-// BuildFeePayerTransaction builds an orderless transaction wrapped as fee-payer
+// BuildFeePayerTransaction builds an transaction wrapped as fee-payer
 // (sender = fee-payer = senderAddr). Returns the RawTransactionWithData for signing.
 func (c *Client) BuildFeePayerTransaction(
 	senderAddr aptossdk.AccountAddress,
+	feePayerAddr aptossdk.AccountAddress,
 	payload aptossdk.TransactionPayload,
 	maxGasAmount uint64,
 ) (*aptossdk.RawTransactionWithData, error) {
-
-	ef, ok := payload.Payload.(*aptossdk.EntryFunction)
-	if !ok {
-		return nil, fmt.Errorf("payload must be EntryFunction, got %T", payload.Payload)
-	}
-
-	orderlessPayload := aptossdk.TransactionPayload{
-		Payload: ef,
-	}
-
 	gas := c.maxGasAmount
 	if maxGasAmount > 0 {
 		gas = maxGasAmount
 	}
 
-	rawTxn, err := c.Inner.BuildTransactionMultiAgent(senderAddr, orderlessPayload,
-		aptossdk.FeePayer(&senderAddr),
+	rawTxn, err := c.Inner.BuildTransactionMultiAgent(senderAddr, payload,
+		aptossdk.FeePayer(&feePayerAddr),
 		aptossdk.ExpirationSeconds(c.expirationSec),
 		aptossdk.MaxGasAmount(gas),
 	)
@@ -151,12 +130,4 @@ func (c *Client) View(functionID string, typeArgs []string, args [][]byte) ([]an
 		return nil, fmt.Errorf("parse view response: %w", err)
 	}
 	return result, nil
-}
-
-func randomNonce() (uint64, error) {
-	var buf [8]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return 0, err
-	}
-	return binary.LittleEndian.Uint64(buf[:]) & 0x7FFFFFFFFFFFFFFF, nil
 }

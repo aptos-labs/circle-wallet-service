@@ -157,8 +157,8 @@ type SignMessageResponse struct {
 	} `json:"data"`
 }
 
-// SignMessage calls Circle's sign/message endpoint.
-func (c *Client) SignMessage(ctx context.Context, req *SignTransactionForDeveloperRequest) (*SignMessageResponse, error) {
+// SignTransaction calls Circle's sign/transaction endpoint per the Aptos Signing APIs tutorial.
+func (c *Client) SignTransaction(ctx context.Context, req *SignTransactionForDeveloperRequest) (*SignMessageResponse, error) {
 	jsonBody, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
@@ -182,7 +182,7 @@ func (c *Client) SignMessage(ctx context.Context, req *SignTransactionForDevelop
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("circle sign/message error (status %d): %s %w", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("circle sign/transaction error (status %d): %s", resp.StatusCode, string(body))
 	}
 	var result SignMessageResponse
 	if err := json.Unmarshal(body, &result); err != nil {

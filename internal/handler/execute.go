@@ -6,7 +6,6 @@ import (
 	"time"
 
 	aptossdk "github.com/aptos-labs/aptos-go-sdk"
-	"github.com/aptos-labs/aptos-go-sdk/bcs"
 	"github.com/aptos-labs/aptos-go-sdk/crypto"
 	"github.com/aptos-labs/jc-contract-integration/internal/aptos"
 	"github.com/aptos-labs/jc-contract-integration/internal/circle"
@@ -55,62 +54,15 @@ func Execute(
 			return
 		}
 
-		// Parse function ID.
-		addr, module, function, err := aptos.ParseFunctionID(req.FunctionID)
+		// Build payload
+		entryFunction, err := abiCache.BuildEntryFunctionPayload(req.FunctionID, req.TypeArguments, req.Arguments)
 		if err != nil {
-			errorResponse(w, http.StatusBadRequest, err.Error())
+			errorResponse(w, http.StatusInternalServerError, "failed to build entry function payload: "+err.Error())
 			return
 		}
 
-		// Resolve ABI params and validate argument count.
-		params, err := abiCache.GetFunctionParams(addr, module, function)
-		if err != nil {
-			errorResponse(w, http.StatusBadRequest, "resolve ABI: "+err.Error())
-			return
-		}
-		if len(req.Arguments) != len(params) {
-			errorResponse(w, http.StatusBadRequest, "argument count mismatch: expected "+
-				itoa(len(params))+", got "+itoa(len(req.Arguments)))
-			return
-		}
-
-		// BCS-serialize each argument.
-		args := make([][]byte, len(req.Arguments))
-		for i, arg := range req.Arguments {
-			b, err := aptos.SerializeArgument(params[i], arg)
-			if err != nil {
-				errorResponse(w, http.StatusBadRequest, "argument["+itoa(i)+"]: "+err.Error())
-				return
-			}
-			args[i] = b
-		}
-
-		// Parse type arguments (default to empty slice).
-		typeTags, err := aptos.ParseTypeTags(req.TypeArguments)
-		if err != nil {
-			errorResponse(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if typeTags == nil {
-			typeTags = []aptossdk.TypeTag{}
-		}
-
-		// Build EntryFunction payload.
-		modAddr, err := aptos.ParseAddress(addr)
-		if err != nil {
-			errorResponse(w, http.StatusBadRequest, "invalid module address: "+err.Error())
-			return
-		}
 		payload := aptossdk.TransactionPayload{
-			Payload: &aptossdk.EntryFunction{
-				Module: aptossdk.ModuleId{
-					Address: modAddr,
-					Name:    module,
-				},
-				Function: function,
-				ArgTypes: typeTags,
-				Args:     args,
-			},
+			Payload: entryFunction,
 		}
 
 		// Parse sender address from wallet.
@@ -127,24 +79,26 @@ func Execute(
 		}
 
 		// Build fee-payer transaction.
-		rawTxnWithData, err := client.BuildTransaction(senderAddr, payload, maxGas)
+		rawTxnWithData, err := client.BuildFeePayerTransaction(senderAddr, senderAddr, payload, maxGas)
 		if err != nil {
 			logger.Error("build transaction failed", "error", err)
 			errorResponse(w, http.StatusInternalServerError, "failed to build transaction")
 			return
 		}
 
-		// Sign via Circle (sender = fee-payer = same wallet, so one signature covers both).
+		// Sign via Circle (sender = fee-payer = same wallet, so one signature covers both for now).
 		auth, err := signer.SignTransaction(r.Context(), rawTxnWithData, wallet.WalletID, wallet.PublicKey)
 		if err != nil {
+			logger.Warn("WALLET", "wallet", wallet.WalletID)
+			logger.Warn("TRANSACTION", "error", rawTxnWithData)
 			logger.Error("sign transaction failed", "error", err)
 			errorResponse(w, http.StatusInternalServerError, "failed to sign transaction")
 			return
 		}
 
-		//signedTxn, ok := rawTxnWithData.ToFeePayerSignedTransaction(auth, auth, []crypto.AccountAuthenticator{})
-		signedTxn, err := rawTxnWithData.SignedTransactionWithAuthenticator(auth)
-		if err != nil {
+		// signedTxn, ok := rawTxnWithData.ToFeePayerSignedTransaction(auth, auth, []crypto.AccountAuthenticator{})
+		signedTxn, ok := rawTxnWithData.ToFeePayerSignedTransaction(auth, auth, []crypto.AccountAuthenticator{})
+		if !ok {
 			logger.Error("failed to build transaction", "error", err)
 			errorResponse(w, http.StatusInternalServerError, "failed to build signed transaction")
 			return
@@ -170,14 +124,17 @@ func Execute(
 		}
 
 		pubkey := &crypto.Ed25519PublicKey{}
-		_ = pubkey.FromHex(wallet.PublicKey)
-		msg, _ := bcs.Serialize(rawTxnWithData)
+		err = pubkey.FromHex(wallet.PublicKey)
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid public key")
+		}
+		msg, _ := rawTxnWithData.SigningMessage()
 		err = signedTxn.Verify()
 		if err != nil {
 			logger.Error("failed to verify signed transaction", "error", err)
 		}
 		b := signedTxn.Authenticator.Verify(msg)
-		if b == false {
+		if !b {
 			logger.Error("failed to verify signed transaction from transaction", "error", b)
 		}
 
