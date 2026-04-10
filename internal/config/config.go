@@ -67,6 +67,13 @@ type Config struct {
 	TxnExpirationSeconds int
 	PollIntervalSeconds  int
 	StoreTTLSeconds      int
+
+	// Orderless transactions (replay-protection nonce mode)
+	OrderlessEnabled bool
+	NonceTTLSeconds  int
+
+	// Idempotency
+	IdempotencyTTLSeconds int
 }
 
 // Load reads configuration from environment variables with .env fallback.
@@ -106,6 +113,11 @@ func Load() (*Config, error) {
 		TxnExpirationSeconds: envInt("TXN_EXPIRATION_SECONDS", 60),
 		PollIntervalSeconds:  envInt("POLL_INTERVAL_SECONDS", 5),
 		StoreTTLSeconds:      envInt("STORE_TTL_SECONDS", 180),
+
+		OrderlessEnabled: envBool("ORDERLESS_ENABLED", true),
+		NonceTTLSeconds:  envInt("NONCE_TTL_SECONDS", 120),
+
+		IdempotencyTTLSeconds: envInt("IDEMPOTENCY_TTL_SECONDS", 300),
 	}
 
 	if err := cfg.validate(); err != nil {

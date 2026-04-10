@@ -165,6 +165,56 @@ func TestMemoryStore_GetNotFound(t *testing.T) {
 	}
 }
 
+func TestMemoryStore_GetByIdempotencyKey(t *testing.T) {
+	s := NewMemoryStore(time.Hour)
+	defer func(s *MemoryStore) {
+		_ = s.Close()
+	}(s)
+
+	ctx := context.Background()
+	rec := &TransactionRecord{
+		ID:             "txn-idemp",
+		IdempotencyKey: "key-abc",
+		Status:         StatusSubmitted,
+		SenderAddress:  "0xabc",
+		FunctionID:     "0x1::module::func",
+		WalletID:       "wallet-1",
+	}
+
+	if err := s.Create(ctx, rec); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := s.GetByIdempotencyKey(ctx, "key-abc")
+	if err != nil {
+		t.Fatalf("GetByIdempotencyKey: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected record, got nil")
+	}
+	if got.ID != "txn-idemp" {
+		t.Errorf("ID = %q, want %q", got.ID, "txn-idemp")
+	}
+
+	// Miss
+	got2, err := s.GetByIdempotencyKey(ctx, "nonexistent")
+	if err != nil {
+		t.Fatalf("GetByIdempotencyKey miss: %v", err)
+	}
+	if got2 != nil {
+		t.Fatalf("expected nil, got %+v", got2)
+	}
+
+	// Empty key always returns nil
+	got3, err := s.GetByIdempotencyKey(ctx, "")
+	if err != nil {
+		t.Fatalf("GetByIdempotencyKey empty: %v", err)
+	}
+	if got3 != nil {
+		t.Fatalf("expected nil for empty key, got %+v", got3)
+	}
+}
+
 func TestMemoryStore_Eviction(t *testing.T) {
 	s := NewMemoryStore(50 * time.Millisecond)
 	defer func(s *MemoryStore) {

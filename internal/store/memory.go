@@ -73,6 +73,24 @@ func (s *MemoryStore) Get(_ context.Context, id string) (*TransactionRecord, err
 	return &cp, nil
 }
 
+// GetByIdempotencyKey returns a copy of the first record matching the given
+// idempotency key, or nil if no record matches.
+func (s *MemoryStore) GetByIdempotencyKey(_ context.Context, key string) (*TransactionRecord, error) {
+	if key == "" {
+		return nil, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, rec := range s.records {
+		if rec.IdempotencyKey == key {
+			cp := *rec
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
 // ListByStatus returns copies of all records matching the given status.
 func (s *MemoryStore) ListByStatus(_ context.Context, status TxnStatus) ([]*TransactionRecord, error) {
 	s.mu.RLock()
