@@ -16,6 +16,8 @@ import (
 	circle2 "github.com/aptos-labs/jc-contract-integration/internal/circle"
 	"github.com/aptos-labs/jc-contract-integration/internal/config"
 	handler2 "github.com/aptos-labs/jc-contract-integration/internal/handler"
+	"github.com/aptos-labs/jc-contract-integration/internal/idempotency"
+	"github.com/aptos-labs/jc-contract-integration/internal/nonce"
 	"github.com/aptos-labs/jc-contract-integration/internal/poller"
 	"github.com/aptos-labs/jc-contract-integration/internal/store"
 	"github.com/aptos-labs/jc-contract-integration/internal/webhook"
@@ -79,12 +81,24 @@ func run(logger *slog.Logger) error {
 		}
 	}(memStore)
 
+	nonceStore := nonce.NewStore(time.Duration(cfg.NonceTTLSeconds) * time.Second)
+	defer nonceStore.Close()
+
+	idempotencyStore := idempotency.NewStore(time.Duration(cfg.IdempotencyTTLSeconds) * time.Second)
+	defer idempotencyStore.Close()
+
 	notifier := webhook.NewNotifier(cfg.WebhookURL, logger)
 	txnPoller := poller.New(aptosClient, memStore, notifier, time.Duration(cfg.PollIntervalSeconds)*time.Second, logger)
 
+	logger.Info("features",
+		"orderless_enabled", cfg.OrderlessEnabled,
+		"nonce_ttl_seconds", cfg.NonceTTLSeconds,
+		"idempotency_ttl_seconds", cfg.IdempotencyTTLSeconds,
+	)
+
 	// Build router
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/execute", handler2.Execute(cfg, aptosClient, abiCache, circleSigner, memStore, logger))
+	mux.HandleFunc("POST /v1/execute", handler2.Execute(cfg, aptosClient, abiCache, circleSigner, memStore, nonceStore, idempotencyStore, logger))
 	mux.HandleFunc("POST /v1/query", handler2.Query(aptosClient, abiCache))
 	mux.HandleFunc("GET /v1/transactions/{id}", handler2.GetTransaction(memStore))
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
@@ -10,17 +11,61 @@ import (
 	"github.com/aptos-labs/jc-contract-integration/internal/aptos"
 	"github.com/aptos-labs/jc-contract-integration/internal/circle"
 	"github.com/aptos-labs/jc-contract-integration/internal/config"
+	"github.com/aptos-labs/jc-contract-integration/internal/idempotency"
+	"github.com/aptos-labs/jc-contract-integration/internal/nonce"
 	"github.com/aptos-labs/jc-contract-integration/internal/store"
 	"github.com/google/uuid"
 )
 
+// walletInfo allows callers to supply wallet credentials inline rather
+// than relying on pre-configured wallets in CIRCLE_WALLETS.
+type walletInfo struct {
+	WalletID  string `json:"wallet_id"`
+	Address   string `json:"address"`
+	PublicKey string `json:"public_key"`
+}
+
 type executeRequest struct {
-	WalletID      string   `json:"wallet_id"`
+	// Wallet identification — either wallet_id (looked up from config) or
+	// inline wallet object. If both are provided, the inline wallet takes
+	// precedence.
+	WalletID string      `json:"wallet_id"`
+	Wallet   *walletInfo `json:"wallet,omitempty"`
+
 	FunctionID    string   `json:"function_id"`
 	TypeArguments []string `json:"type_arguments"`
 	Arguments     []any    `json:"arguments"`
 	MaxGasAmount  *uint64  `json:"max_gas_amount,omitempty"`
 	WebhookURL    string   `json:"webhook_url,omitempty"`
+
+	// When true (or when the server default is true and this is nil),
+	// the transaction uses a replay-protection nonce instead of an
+	// ordered sequence number.
+	Orderless *bool `json:"orderless,omitempty"`
+
+	// Optional client-provided idempotency key. If a request with the
+	// same key was already processed, the cached response is returned.
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+
+// resolveWallet returns the Circle wallet to use for this request.
+// Per-request wallet info takes precedence over config-based lookup.
+func resolveWallet(cfg *config.Config, req *executeRequest) (config.CircleWallet, bool) {
+	if req.Wallet != nil {
+		w := config.CircleWallet{
+			WalletID:  req.Wallet.WalletID,
+			Address:   req.Wallet.Address,
+			PublicKey: req.Wallet.PublicKey,
+		}
+		if w.WalletID == "" || w.Address == "" || w.PublicKey == "" {
+			return config.CircleWallet{}, false
+		}
+		return w, true
+	}
+	if req.WalletID != "" {
+		return cfg.LookupWallet(req.WalletID)
+	}
+	return config.CircleWallet{}, false
 }
 
 // Execute handles POST /v1/execute.
@@ -30,6 +75,8 @@ func Execute(
 	abiCache *aptos.ABICache,
 	signer *circle.Signer,
 	st store.Store,
+	nonceStore *nonce.Store,
+	idempotencyStore *idempotency.Store,
 	logger *slog.Logger,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -38,8 +85,25 @@ func Execute(
 			errorResponse(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 			return
 		}
-		if req.WalletID == "" {
-			errorResponse(w, http.StatusBadRequest, "wallet_id is required")
+
+		// --- Idempotency check ---------------------------------------------------
+		idempKey := req.IdempotencyKey
+		if idempKey == "" {
+			idempKey = r.Header.Get("Idempotency-Key")
+		}
+		if idempKey != "" {
+			if cached := idempotencyStore.Get(idempKey); cached != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-Idempotency-Replayed", "true")
+				w.WriteHeader(cached.StatusCode)
+				_, _ = w.Write(cached.Body)
+				return
+			}
+		}
+
+		// --- Validate required fields -------------------------------------------
+		if req.WalletID == "" && req.Wallet == nil {
+			errorResponse(w, http.StatusBadRequest, "wallet_id or wallet object is required")
 			return
 		}
 		if req.FunctionID == "" {
@@ -47,75 +111,97 @@ func Execute(
 			return
 		}
 
-		// Look up wallet by wallet_id or address.
-		wallet, ok := cfg.LookupWallet(req.WalletID)
+		// --- Resolve wallet -----------------------------------------------------
+		wallet, ok := resolveWallet(cfg, &req)
 		if !ok {
-			errorResponse(w, http.StatusBadRequest, "unknown wallet_id or address")
+			errorResponse(w, http.StatusBadRequest, "unknown wallet_id/address or incomplete inline wallet (wallet_id, address, public_key required)")
 			return
 		}
 
-		// Build payload
+		// --- Determine orderless mode -------------------------------------------
+		orderless := cfg.OrderlessEnabled
+		if req.Orderless != nil {
+			orderless = *req.Orderless
+		}
+
+		// --- Build payload ------------------------------------------------------
 		entryFunction, err := abiCache.BuildEntryFunctionPayload(req.FunctionID, req.TypeArguments, req.Arguments)
 		if err != nil {
 			errorResponse(w, http.StatusInternalServerError, "failed to build entry function payload: "+err.Error())
 			return
 		}
 
-		payload := aptossdk.TransactionPayload{
-			Payload: entryFunction,
-		}
-
-		// Parse sender address from wallet.
 		senderAddr, err := aptos.ParseAddress(wallet.Address)
 		if err != nil {
 			errorResponse(w, http.StatusBadRequest, "invalid wallet address: "+err.Error())
 			return
 		}
 
-		// Resolve gas override.
 		var maxGas uint64
 		if req.MaxGasAmount != nil {
 			maxGas = *req.MaxGasAmount
 		}
 
-		// Build fee-payer transaction.
-		rawTxnWithData, err := client.BuildFeePayerTransaction(senderAddr, senderAddr, payload, maxGas)
-		if err != nil {
-			logger.Error("build transaction failed", "error", err)
-			errorResponse(w, http.StatusInternalServerError, "failed to build transaction")
-			return
+		// --- Build transaction (ordered vs orderless) ---------------------------
+		var replayNonce *uint64
+		var rawTxnWithData *aptossdk.RawTransactionWithData
+		if orderless {
+			n, err := nonceStore.Generate(wallet.Address)
+			if err != nil {
+				logger.Error("nonce generation failed", "error", err)
+				errorResponse(w, http.StatusInternalServerError, "failed to generate replay nonce")
+				return
+			}
+			replayNonce = &n
+
+			rawTxnWithData, err = client.BuildOrderlessFeePayerTransaction(senderAddr, senderAddr, entryFunction, n, maxGas)
+			if err != nil {
+				logger.Error("build orderless transaction failed", "error", err)
+				errorResponse(w, http.StatusInternalServerError, "failed to build transaction")
+				return
+			}
+		} else {
+			payload := aptossdk.TransactionPayload{Payload: entryFunction}
+			var err error
+			rawTxnWithData, err = client.BuildFeePayerTransaction(senderAddr, senderAddr, payload, maxGas)
+			if err != nil {
+				logger.Error("build transaction failed", "error", err)
+				errorResponse(w, http.StatusInternalServerError, "failed to build transaction")
+				return
+			}
 		}
 
-		// Sign via Circle (sender = fee-payer = same wallet, so one signature covers both for now).
+		// --- Sign via Circle ----------------------------------------------------
 		auth, err := signer.SignTransaction(r.Context(), rawTxnWithData, wallet.WalletID, wallet.PublicKey)
 		if err != nil {
-			logger.Warn("WALLET", "wallet", wallet.WalletID)
-			logger.Warn("TRANSACTION", "error", rawTxnWithData)
-			logger.Error("sign transaction failed", "error", err)
+			logger.Error("sign transaction failed", "error", err, "wallet", wallet.WalletID)
 			errorResponse(w, http.StatusInternalServerError, "failed to sign transaction")
 			return
 		}
 
-		// signedTxn, ok := rawTxnWithData.ToFeePayerSignedTransaction(auth, auth, []crypto.AccountAuthenticator{})
+		// --- Assemble signed transaction ----------------------------------------
 		signedTxn, ok := rawTxnWithData.ToFeePayerSignedTransaction(auth, auth, []crypto.AccountAuthenticator{})
 		if !ok {
-			logger.Error("failed to build transaction", "error", err)
+			logger.Error("failed to assemble fee-payer signed transaction")
 			errorResponse(w, http.StatusInternalServerError, "failed to build signed transaction")
 			return
 		}
 
-		// Create transaction record.
+		// --- Create transaction record ------------------------------------------
 		now := time.Now().UTC()
 		rec := &store.TransactionRecord{
-			ID:            uuid.New().String(),
-			Status:        store.StatusPending,
-			SenderAddress: wallet.Address,
-			FunctionID:    req.FunctionID,
-			WalletID:      req.WalletID,
-			WebhookURL:    req.WebhookURL,
-			CreatedAt:     now,
-			UpdatedAt:     now,
-			ExpiresAt:     now.Add(time.Duration(cfg.TxnExpirationSeconds) * time.Second),
+			ID:             uuid.New().String(),
+			IdempotencyKey: idempKey,
+			Status:         store.StatusPending,
+			SenderAddress:  wallet.Address,
+			FunctionID:     req.FunctionID,
+			WalletID:       wallet.WalletID,
+			Orderless:      orderless,
+			ReplayNonce:    replayNonce,
+			WebhookURL:     req.WebhookURL,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+			ExpiresAt:      now.Add(time.Duration(cfg.TxnExpirationSeconds) * time.Second),
 		}
 		if err := st.Create(r.Context(), rec); err != nil {
 			logger.Error("store create failed", "error", err)
@@ -123,25 +209,22 @@ func Execute(
 			return
 		}
 
+		// --- Verify signature (best-effort logging) -----------------------------
 		pubkey := &crypto.Ed25519PublicKey{}
-		err = pubkey.FromHex(wallet.PublicKey)
-		if err != nil {
-			errorResponse(w, http.StatusBadRequest, "invalid public key")
-		}
-		msg, _ := rawTxnWithData.SigningMessage()
-		err = signedTxn.Verify()
-		if err != nil {
-			logger.Error("failed to verify signed transaction", "error", err)
-		}
-		b := signedTxn.Authenticator.Verify(msg)
-		if !b {
-			logger.Error("failed to verify signed transaction from transaction", "error", b)
+		if err := pubkey.FromHex(wallet.PublicKey); err == nil {
+			if err := signedTxn.Verify(); err != nil {
+				logger.Error("failed to verify signed transaction", "error", err)
+			}
+			if msg, err := rawTxnWithData.SigningMessage(); err == nil {
+				if !signedTxn.Authenticator.Verify(msg) {
+					logger.Error("authenticator verification failed")
+				}
+			}
 		}
 
-		// Submit transaction.
+		// --- Submit transaction -------------------------------------------------
 		submitResp, err := client.SubmitTransaction(signedTxn)
 		if err != nil {
-			logger.Error("submit transaction failed", "Txn", signedTxn)
 			logger.Error("submit transaction failed", "error", err)
 			rec.Status = store.StatusFailed
 			rec.ErrorMessage = err.Error()
@@ -151,7 +234,6 @@ func Execute(
 			return
 		}
 
-		// Update record to submitted with txn hash.
 		rec.Status = store.StatusSubmitted
 		rec.TxnHash = submitResp.Hash
 		rec.UpdatedAt = time.Now().UTC()
@@ -159,10 +241,22 @@ func Execute(
 			logger.Error("store update failed", "error", err)
 		}
 
-		jsonResponse(w, http.StatusAccepted, map[string]string{
+		respBody := map[string]any{
 			"transaction_id": rec.ID,
 			"status":         string(rec.Status),
 			"txn_hash":       rec.TxnHash,
-		})
+			"orderless":      orderless,
+		}
+		if replayNonce != nil {
+			respBody["replay_nonce"] = *replayNonce
+		}
+
+		// Cache idempotent response
+		if idempKey != "" {
+			bodyBytes, _ := json.Marshal(respBody)
+			idempotencyStore.Set(idempKey, http.StatusAccepted, bodyBytes)
+		}
+
+		jsonResponse(w, http.StatusAccepted, respBody)
 	}
 }
