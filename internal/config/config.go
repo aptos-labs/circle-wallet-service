@@ -130,11 +130,13 @@ func (c *Config) validate() error {
 	if c.APIKey == "" && !c.TestingMode {
 		return fmt.Errorf("API_KEY is required unless TESTING_MODE is enabled")
 	}
-	if c.CircleAPIKey == "" {
-		return fmt.Errorf("CIRCLE_API_KEY is required")
-	}
-	if c.CircleEntitySecret == "" {
-		return fmt.Errorf("CIRCLE_ENTITY_SECRET is required")
+	if !c.TestingMode {
+		if c.CircleAPIKey == "" {
+			return fmt.Errorf("CIRCLE_API_KEY is required")
+		}
+		if c.CircleEntitySecret == "" {
+			return fmt.Errorf("CIRCLE_ENTITY_SECRET is required")
+		}
 	}
 	if c.MaxGasAmount == 0 {
 		return fmt.Errorf("MAX_GAS_AMOUNT must be greater than 0")

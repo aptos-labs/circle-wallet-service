@@ -45,34 +45,46 @@ func run(logger *slog.Logger) error {
 	)
 
 	// Resolve public keys for wallets that don't have them configured
-	circleClient := circle2.NewClient(cfg.CircleAPIKey)
-	for i := range cfg.CircleWallets {
-		w := &cfg.CircleWallets[i]
-		if w.PublicKey != "" {
-			continue
+	var circleClient *circle2.Client
+	var circleSigner *circle2.Signer
+	if cfg.CircleAPIKey != "" {
+		circleClient = circle2.NewClient(cfg.CircleAPIKey)
+		for i := range cfg.CircleWallets {
+			w := &cfg.CircleWallets[i]
+			if w.PublicKey != "" {
+				continue
+			}
+			walletResp, err := circleClient.GetWallet(context.Background(), w.WalletID)
+			if err != nil {
+				return fmt.Errorf("fetch public key for wallet %s: %w", w.WalletID, err)
+			}
+			pk := walletResp.Data.Wallet.InitialPublicKey
+			if pk == "" {
+				return fmt.Errorf("wallet %s has no initialPublicKey", w.WalletID)
+			}
+			if !strings.HasPrefix(pk, "0x") {
+				pk = "0x" + pk
+			}
+			w.PublicKey = pk
+			logger.Info("resolved wallet public key", "wallet_id", w.WalletID, "address", w.Address)
 		}
-		walletResp, err := circleClient.GetWallet(context.Background(), w.WalletID)
-		if err != nil {
-			return fmt.Errorf("fetch public key for wallet %s: %w", w.WalletID, err)
-		}
-		pk := walletResp.Data.Wallet.InitialPublicKey
-		if pk == "" {
-			return fmt.Errorf("wallet %s has no initialPublicKey", w.WalletID)
-		}
-		if !strings.HasPrefix(pk, "0x") {
-			pk = "0x" + pk
-		}
-		w.PublicKey = pk
-		logger.Info("resolved wallet public key", "wallet_id", w.WalletID, "address", w.Address)
+		circleSigner = circle2.NewSigner(circleClient, cfg.CircleEntitySecret)
+	} else {
+		logger.Warn("Circle credentials not configured; execute endpoint will not work")
 	}
 
 	// Initialize components
-	aptosClient, err := aptos.NewClient(cfg.AptosNodeURL, cfg.AptosChainID, int64(cfg.TxnExpirationSeconds), cfg.MaxGasAmount)
-	if err != nil {
-		return fmt.Errorf("init aptos client: %w", err)
+	var aptosClient *aptos.Client
+	var abiCache *aptos.ABICache
+	if cfg.AptosNodeURL != "" {
+		aptosClient, err = aptos.NewClient(cfg.AptosNodeURL, cfg.AptosChainID, int64(cfg.TxnExpirationSeconds), cfg.MaxGasAmount)
+		if err != nil {
+			return fmt.Errorf("init aptos client: %w", err)
+		}
+		abiCache = aptos.NewABICache(aptosClient.Inner)
+	} else {
+		logger.Warn("APTOS_NODE_URL not configured; execute and query endpoints will not work")
 	}
-	abiCache := aptos.NewABICache(aptosClient.Inner)
-	circleSigner := circle2.NewSigner(circleClient, cfg.CircleEntitySecret)
 	memStore := store.NewMemoryStore(time.Duration(cfg.StoreTTLSeconds) * time.Second)
 	defer func(memStore *store.MemoryStore) {
 		err := memStore.Close()
@@ -88,7 +100,6 @@ func run(logger *slog.Logger) error {
 	defer idempotencyStore.Close()
 
 	notifier := webhook.NewNotifier(cfg.WebhookURL, logger)
-	txnPoller := poller.New(aptosClient, memStore, notifier, time.Duration(cfg.PollIntervalSeconds)*time.Second, logger)
 
 	logger.Info("features",
 		"orderless_enabled", cfg.OrderlessEnabled,
@@ -98,8 +109,24 @@ func run(logger *slog.Logger) error {
 
 	// Build router
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/execute", handler2.Execute(cfg, aptosClient, abiCache, circleSigner, memStore, nonceStore, idempotencyStore, logger))
-	mux.HandleFunc("POST /v1/query", handler2.Query(aptosClient, abiCache))
+	if aptosClient != nil && circleSigner != nil {
+		mux.HandleFunc("POST /v1/execute", handler2.Execute(cfg, aptosClient, abiCache, circleSigner, memStore, nonceStore, idempotencyStore, logger))
+	} else {
+		mux.HandleFunc("POST /v1/execute", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"execute endpoint not configured (missing Circle or Aptos credentials)"}`))
+		})
+	}
+	if aptosClient != nil {
+		mux.HandleFunc("POST /v1/query", handler2.Query(aptosClient, abiCache))
+	} else {
+		mux.HandleFunc("POST /v1/query", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"query endpoint not configured (missing Aptos credentials)"}`))
+		})
+	}
 	mux.HandleFunc("GET /v1/transactions/{id}", handler2.GetTransaction(memStore))
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -141,7 +168,10 @@ func run(logger *slog.Logger) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	go txnPoller.Run(ctx)
+	if aptosClient != nil {
+		txnPoller := poller.New(aptosClient, memStore, notifier, time.Duration(cfg.PollIntervalSeconds)*time.Second, logger)
+		go txnPoller.Run(ctx)
+	}
 
 	go func() {
 		logger.Info("server starting", "addr", srv.Addr)

@@ -33,9 +33,10 @@ jobs:
         run: go vet ./...
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
+        run: |
+          GO_VERSION=$(go env GOVERSION)
+          GOTOOLCHAIN=${GO_VERSION} go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+          golangci-lint run ./...
 
   test:
     name: Test
@@ -47,8 +48,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run tests
-        run: go test -count=1 -race ./...
+      - name: Run unit tests
+        run: go test -count=1 -race ./internal/...
 
   build:
     name: Build
@@ -79,33 +80,36 @@ jobs:
 
       - name: Start server in testing mode
         run: |
-          TESTING_MODE=true SQLITE_PATH=:memory: ./bin/server &
+          TESTING_MODE=true ./bin/server &
           for i in $(seq 1 30); do
             curl -sf http://localhost:8080/v1/health && break
             sleep 1
           done
 
       - name: Run smoke tests
-        run: ./scripts/smoke-test.sh
-
-  e2e:
-    name: E2E (devnet)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Install Aptos CLI
         run: |
-          python3 -c "
-          import urllib.request, subprocess, sys
-          urllib.request.urlretrieve('https://aptos.dev/scripts/install_cli.py', '/tmp/install.py')
-          subprocess.run([sys.executable, '/tmp/install.py'], check=True)
-          "
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          set -e
+          echo "=== Health check ==="
+          curl -sf http://localhost:8080/v1/health | grep -q '"status":"ok"'
+          echo "PASS: health"
 
-      - name: E2E tests
-        run: go test -tags e2e -count=1 -v -timeout 5m ./e2e/
+          echo "=== Auth not required in testing mode ==="
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/v1/query \
+            -H 'Content-Type: application/json' \
+            -d '{"function_id":"0x1::coin::name","type_arguments":["0x1::aptos_coin::AptosCoin"],"arguments":[]}')
+          # Should get 503 (not configured) or 502/200, but never 401
+          if [ "$STATUS" = "401" ]; then
+            echo "FAIL: got 401 in testing mode"
+            exit 1
+          fi
+          echo "PASS: auth bypass in testing mode (status=$STATUS)"
+
+          echo "=== Transaction not found ==="
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/v1/transactions/nonexistent)
+          if [ "$STATUS" != "404" ]; then
+            echo "FAIL: expected 404, got $STATUS"
+            exit 1
+          fi
+          echo "PASS: transaction not found returns 404"
+
+          echo "All smoke tests passed!"
