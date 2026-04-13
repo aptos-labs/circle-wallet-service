@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// MemoryStore is an in-memory Store implementation with TTL-based eviction.
+// MemoryStore is an in-memory Store implementation (tests / local tooling).
 type MemoryStore struct {
 	mu             sync.RWMutex
 	records        map[string]*TransactionRecord
@@ -29,8 +29,7 @@ func NewMemoryStore(ttl time.Duration) *MemoryStore {
 	return s
 }
 
-// Create stores a new transaction record. It returns an error if a record with
-// the same ID already exists.
+// Create stores a new transaction record.
 func (s *MemoryStore) Create(_ context.Context, rec *TransactionRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -46,13 +45,16 @@ func (s *MemoryStore) Create(_ context.Context, rec *TransactionRecord) error {
 	s.records[rec.ID] = &cp
 
 	if cp.IdempotencyKey != "" {
+		if _, exists := s.idempotencyIdx[cp.IdempotencyKey]; exists {
+			return fmt.Errorf("%w", ErrIdempotencyConflict)
+		}
 		s.idempotencyIdx[cp.IdempotencyKey] = cp.ID
 	}
 
 	return nil
 }
 
-// Update replaces an existing record. It returns an error if the record is not found.
+// Update replaces an existing record.
 func (s *MemoryStore) Update(_ context.Context, rec *TransactionRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -62,7 +64,6 @@ func (s *MemoryStore) Update(_ context.Context, rec *TransactionRecord) error {
 		return fmt.Errorf("record with id %q not found", rec.ID)
 	}
 
-	// Clean up old idempotency index entry if the key changed.
 	if old.IdempotencyKey != "" && old.IdempotencyKey != rec.IdempotencyKey {
 		delete(s.idempotencyIdx, old.IdempotencyKey)
 	}
@@ -91,8 +92,7 @@ func (s *MemoryStore) Get(_ context.Context, id string) (*TransactionRecord, err
 	return &cp, nil
 }
 
-// GetByIdempotencyKey returns a copy of the record matching the given
-// idempotency key, or nil if no record matches.
+// GetByIdempotencyKey returns a copy of the record matching the given idempotency key.
 func (s *MemoryStore) GetByIdempotencyKey(_ context.Context, key string) (*TransactionRecord, error) {
 	if key == "" {
 		return nil, nil
@@ -133,7 +133,6 @@ func (s *MemoryStore) Close() error {
 	return nil
 }
 
-// reaper runs in a goroutine and periodically calls evict.
 func (s *MemoryStore) reaper() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -148,7 +147,6 @@ func (s *MemoryStore) reaper() {
 	}
 }
 
-// evict deletes records with CreatedAt older than the configured TTL.
 func (s *MemoryStore) evict() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

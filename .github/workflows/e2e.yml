@@ -1,0 +1,81 @@
+# Live E2E tests against Aptos + Circle + MySQL. Requires repository secrets.
+# When secrets are unset (e.g. forks), the job skips and succeeds.
+
+name: E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-live:
+    name: E2E (live)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: jcci_e2e
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -proot"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 8
+    env:
+      MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/jcci_e2e?parseTime=true
+      API_KEY: ${{ secrets.API_KEY }}
+      APTOS_NODE_URL: ${{ secrets.APTOS_NODE_URL }}
+      APTOS_CHAIN_ID: ${{ secrets.APTOS_CHAIN_ID }}
+      CIRCLE_API_KEY: ${{ secrets.CIRCLE_API_KEY }}
+      CIRCLE_ENTITY_SECRET: ${{ secrets.CIRCLE_ENTITY_SECRET }}
+      CIRCLE_WALLETS: ${{ secrets.CIRCLE_WALLETS }}
+      E2E_BASE_URL: http://127.0.0.1:8080
+      E2E_API_KEY: ${{ secrets.API_KEY }}
+      E2E_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/jcci_e2e?parseTime=true
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check E2E secrets
+        id: gate
+        shell: bash
+        run: |
+          if [[ -z "${CIRCLE_API_KEY}" || -z "${CIRCLE_ENTITY_SECRET}" || -z "${APTOS_NODE_URL}" || -z "${CIRCLE_WALLETS}" || -z "${API_KEY}" ]]; then
+            echo "E2E secrets not fully configured — skipping (set API_KEY, APTOS_NODE_URL, CIRCLE_API_KEY, CIRCLE_ENTITY_SECRET, CIRCLE_WALLETS)."
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build server
+        if: steps.gate.outputs.skip != '1'
+        run: go build -o bin/server ./cmd/server
+
+      - name: Start server
+        if: steps.gate.outputs.skip != '1'
+        run: |
+          ./bin/server &
+          for i in $(seq 1 90); do
+            curl -sf http://127.0.0.1:8080/v1/health && exit 0
+            sleep 1
+          done
+          echo "server did not become healthy"
+          exit 1
+
+      - name: Run E2E tests
+        if: steps.gate.outputs.skip != '1'
+        run: go test -tags=e2e ./examples/ -count=1 -v
+
+      - name: E2E skipped
+        if: steps.gate.outputs.skip == '1'
+        run: echo "OK — no secrets, E2E skipped"

@@ -7,6 +7,7 @@ import (
 )
 
 func TestMemoryStore_CreateAndGet(t *testing.T) {
+	t.Parallel()
 	s := NewMemoryStore(time.Hour)
 	defer func(s *MemoryStore) {
 		_ = s.Close()
@@ -15,10 +16,11 @@ func TestMemoryStore_CreateAndGet(t *testing.T) {
 	ctx := context.Background()
 	rec := &TransactionRecord{
 		ID:            "txn-1",
-		Status:        StatusPending,
+		Status:        StatusQueued,
 		SenderAddress: "0xabc",
 		FunctionID:    "0x1::module::func",
 		WalletID:      "wallet-1",
+		PayloadJSON:   "{}",
 	}
 
 	if err := s.Create(ctx, rec); err != nil {
@@ -35,8 +37,8 @@ func TestMemoryStore_CreateAndGet(t *testing.T) {
 	if got.ID != "txn-1" {
 		t.Errorf("ID = %q, want %q", got.ID, "txn-1")
 	}
-	if got.Status != StatusPending {
-		t.Errorf("Status = %q, want %q", got.Status, StatusPending)
+	if got.Status != StatusQueued {
+		t.Errorf("Status = %q, want %q", got.Status, StatusQueued)
 	}
 	if got.SenderAddress != "0xabc" {
 		t.Errorf("SenderAddress = %q, want %q", got.SenderAddress, "0xabc")
@@ -56,6 +58,7 @@ func TestMemoryStore_CreateAndGet(t *testing.T) {
 }
 
 func TestMemoryStore_CreateDuplicate(t *testing.T) {
+	t.Parallel()
 	s := NewMemoryStore(time.Hour)
 	defer func(s *MemoryStore) {
 		_ = s.Close()
@@ -64,10 +67,11 @@ func TestMemoryStore_CreateDuplicate(t *testing.T) {
 	ctx := context.Background()
 	rec := &TransactionRecord{
 		ID:            "txn-dup",
-		Status:        StatusPending,
+		Status:        StatusQueued,
 		SenderAddress: "0xabc",
 		FunctionID:    "0x1::module::func",
 		WalletID:      "wallet-1",
+		PayloadJSON:   "{}",
 	}
 
 	if err := s.Create(ctx, rec); err != nil {
@@ -79,6 +83,7 @@ func TestMemoryStore_CreateDuplicate(t *testing.T) {
 }
 
 func TestMemoryStore_Update(t *testing.T) {
+	t.Parallel()
 	s := NewMemoryStore(time.Hour)
 	defer func(s *MemoryStore) {
 		_ = s.Close()
@@ -87,17 +92,17 @@ func TestMemoryStore_Update(t *testing.T) {
 	ctx := context.Background()
 	rec := &TransactionRecord{
 		ID:            "txn-upd",
-		Status:        StatusPending,
+		Status:        StatusQueued,
 		SenderAddress: "0xabc",
 		FunctionID:    "0x1::module::func",
 		WalletID:      "wallet-1",
+		PayloadJSON:   "{}",
 	}
 
 	if err := s.Create(ctx, rec); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// Retrieve to get the CreatedAt set by Create.
 	created, _ := s.Get(ctx, "txn-upd")
 
 	updated := *created
@@ -124,6 +129,7 @@ func TestMemoryStore_Update(t *testing.T) {
 }
 
 func TestMemoryStore_ListByStatus(t *testing.T) {
+	t.Parallel()
 	s := NewMemoryStore(time.Hour)
 	defer func(s *MemoryStore) {
 		_ = s.Close()
@@ -131,9 +137,9 @@ func TestMemoryStore_ListByStatus(t *testing.T) {
 
 	ctx := context.Background()
 	records := []*TransactionRecord{
-		{ID: "txn-a", Status: StatusSubmitted, SenderAddress: "0x1", FunctionID: "f", WalletID: "w"},
-		{ID: "txn-b", Status: StatusSubmitted, SenderAddress: "0x2", FunctionID: "f", WalletID: "w"},
-		{ID: "txn-c", Status: StatusPending, SenderAddress: "0x3", FunctionID: "f", WalletID: "w"},
+		{ID: "txn-a", Status: StatusSubmitted, SenderAddress: "0x1", FunctionID: "f", WalletID: "w", PayloadJSON: "{}"},
+		{ID: "txn-b", Status: StatusSubmitted, SenderAddress: "0x2", FunctionID: "f", WalletID: "w", PayloadJSON: "{}"},
+		{ID: "txn-c", Status: StatusQueued, SenderAddress: "0x3", FunctionID: "f", WalletID: "w", PayloadJSON: "{}"},
 	}
 	for _, r := range records {
 		if err := s.Create(ctx, r); err != nil {
@@ -151,6 +157,7 @@ func TestMemoryStore_ListByStatus(t *testing.T) {
 }
 
 func TestMemoryStore_GetNotFound(t *testing.T) {
+	t.Parallel()
 	s := NewMemoryStore(time.Hour)
 	defer func(s *MemoryStore) {
 		_ = s.Close()
@@ -166,6 +173,7 @@ func TestMemoryStore_GetNotFound(t *testing.T) {
 }
 
 func TestMemoryStore_GetByIdempotencyKey(t *testing.T) {
+	t.Parallel()
 	s := NewMemoryStore(time.Hour)
 	defer func(s *MemoryStore) {
 		_ = s.Close()
@@ -179,6 +187,7 @@ func TestMemoryStore_GetByIdempotencyKey(t *testing.T) {
 		SenderAddress:  "0xabc",
 		FunctionID:     "0x1::module::func",
 		WalletID:       "wallet-1",
+		PayloadJSON:    "{}",
 	}
 
 	if err := s.Create(ctx, rec); err != nil {
@@ -196,7 +205,6 @@ func TestMemoryStore_GetByIdempotencyKey(t *testing.T) {
 		t.Errorf("ID = %q, want %q", got.ID, "txn-idemp")
 	}
 
-	// Miss
 	got2, err := s.GetByIdempotencyKey(ctx, "nonexistent")
 	if err != nil {
 		t.Fatalf("GetByIdempotencyKey miss: %v", err)
@@ -205,7 +213,6 @@ func TestMemoryStore_GetByIdempotencyKey(t *testing.T) {
 		t.Fatalf("expected nil, got %+v", got2)
 	}
 
-	// Empty key always returns nil
 	got3, err := s.GetByIdempotencyKey(ctx, "")
 	if err != nil {
 		t.Fatalf("GetByIdempotencyKey empty: %v", err)
@@ -216,6 +223,7 @@ func TestMemoryStore_GetByIdempotencyKey(t *testing.T) {
 }
 
 func TestMemoryStore_Eviction(t *testing.T) {
+	t.Parallel()
 	s := NewMemoryStore(50 * time.Millisecond)
 	defer func(s *MemoryStore) {
 		_ = s.Close()
@@ -224,10 +232,11 @@ func TestMemoryStore_Eviction(t *testing.T) {
 	ctx := context.Background()
 	rec := &TransactionRecord{
 		ID:            "txn-evict",
-		Status:        StatusPending,
+		Status:        StatusQueued,
 		SenderAddress: "0xabc",
 		FunctionID:    "0x1::module::func",
 		WalletID:      "wallet-1",
+		PayloadJSON:   "{}",
 	}
 
 	if err := s.Create(ctx, rec); err != nil {

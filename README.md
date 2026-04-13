@@ -16,6 +16,7 @@ Generic REST API for interacting with Aptos Move contracts. Uses [Circle Program
 ### 1. Prerequisites
 
 - Go 1.26+
+- MySQL 8.x (local or managed) and a database for this service
 - A [Circle developer account](https://console.circle.com) with:
   - API key
   - Entity secret (32-byte hex)
@@ -37,7 +38,7 @@ Fund your wallet with testnet APT at https://aptos.dev/en/network/faucet
 
 ### 4. Configure
 
-Fill in the remaining `.env` values (at minimum `API_KEY` and `APTOS_NODE_URL`). See [Configuration](#configuration) for all options.
+Fill in the remaining `.env` values (at minimum `API_KEY`, `MYSQL_DSN`, and `APTOS_NODE_URL`). See [Configuration](#configuration) for all options.
 
 ### 5. Run
 
@@ -58,6 +59,35 @@ make test-e2e
 make check
 ```
 
+### E2E tests (local and CI)
+
+End-to-end tests live in `examples/e2e_test.go` and use the build tag `e2e`. They call a **running** server, MySQL, Aptos testnet, and Circle.
+
+**Local**
+
+1. Configure `.env` (same as server): `MYSQL_DSN`, `API_KEY`, Aptos, Circle, and `CIRCLE_WALLETS` (fund wallets on testnet).
+2. Start the server: `make run`
+3. In another terminal: `make test-e2e` (runs `go test -tags=e2e ./examples/ -v -count=1`)
+
+**Extra environment variables (optional)**
+
+| Variable | Description |
+|----------|-------------|
+| `E2E_BASE_URL` | Server URL (default `http://localhost:8080`) |
+| `E2E_API_KEY` | Bearer secret; defaults to `API_KEY` |
+| `E2E_WALLET_ID` / `E2E_WALLET_ADDR` / `E2E_WALLET_PUBLIC_KEY` | Override first wallet from `CIRCLE_WALLETS` |
+| `E2E_WALLET2_ID` / `E2E_WALLET2_ADDR` / `E2E_WALLET2_PUBLIC_KEY` | Second wallet, or use two entries in `CIRCLE_WALLETS` |
+| `E2E_THROUGHPUT` | Concurrent executes per wallet in throughput tests (default 8, max 50) |
+| `E2E_MYSQL_DSN` | MySQL DSN for the stale-processing recovery test; defaults to `MYSQL_DSN` |
+
+Tests that need two funded wallets skip if only one wallet is configured. Inline-wallet and some idempotency paths need `public_key` in JSON or `E2E_WALLET_PUBLIC_KEY`.
+
+**GitHub Actions**
+
+Workflow [.github/workflows/e2e.yml](.github/workflows/e2e.yml) runs on `workflow_dispatch` and on `push` to `main`. It starts MySQL, builds the server, runs it with secrets, then `go test -tags=e2e ./examples/`. If required secrets are missing, the job **skips** E2E steps and succeeds (so forks without secrets stay green).
+
+Configure these **repository secrets** to run live E2E: `API_KEY`, `APTOS_NODE_URL`, `APTOS_CHAIN_ID` (recommended, e.g. `2` for testnet), `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`, `CIRCLE_WALLETS` (JSON array; use **two** wallets to exercise dual-wallet throughput).
+
 ## Configuration
 
 All configuration is via environment variables or a `.env` file in the project root.
@@ -69,6 +99,14 @@ All configuration is via environment variables or a `.env` file in the project r
 | `SERVER_PORT` | `8080` | HTTP listen port |
 | `API_KEY` | *(required)* | Bearer token for protected endpoints |
 | `TESTING_MODE` | `false` | Set `true` to disable auth (development only) |
+
+### MySQL
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MYSQL_DSN` | *(required)* | [go-sql-driver/mysql](https://github.com/go-sql-driver/mysql) DSN (e.g. `user:pass@tcp(127.0.0.1:3306)/dbname?parseTime=true`) |
+
+The server runs embedded migrations on startup. `GET /v1/health?deep=1` checks database connectivity.
 
 ### Aptos
 
@@ -107,7 +145,6 @@ If `public_key` is omitted, it is fetched from Circle at server startup.
 | `MAX_GAS_AMOUNT` | `100000` | Default max gas per transaction |
 | `TXN_EXPIRATION_SECONDS` | `60` | On-chain transaction expiration window |
 | `POLL_INTERVAL_SECONDS` | `5` | Background poller check interval |
-| `STORE_TTL_SECONDS` | `180` | In-memory store eviction TTL |
 
 ### Webhooks
 
@@ -156,24 +193,26 @@ Submit an entry function transaction for async execution.
 | `arguments` | any[] | No | Function arguments (types resolved from on-chain ABI) |
 | `max_gas_amount` | uint64 | No | Override default max gas |
 | `webhook_url` | string | No | Per-request webhook URL |
+| `idempotency_key` | string | No | Optional idempotency key (also accepted as `Idempotency-Key` header) |
 
-**Response (202 Accepted):**
+**Response (202 Accepted):** The request is persisted and queued. A background worker assigns the Aptos account sequence number, signs via Circle, and submits to the network.
 
 ```json
 {
   "transaction_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "submitted",
-  "txn_hash": "0xabc123..."
+  "status": "queued"
 }
 ```
+
+Poll `GET /v1/transactions/{id}` until `status` is `submitted` (includes `txn_hash`), then `confirmed` or `failed`.
 
 **Errors:**
 
 | Status | Cause |
 |--------|-------|
-| 400 | Invalid request, unknown wallet, ABI resolution failure, argument mismatch |
+| 400 | Invalid request, unknown wallet |
 | 401 | Missing or invalid API key |
-| 500 | Transaction build, signing, or submission failure |
+| 500 | Failed to persist the queued transaction |
 
 ### POST /v1/query
 
@@ -234,9 +273,9 @@ Poll the status of a previously submitted transaction.
 **Transaction status lifecycle:**
 
 ```
-pending → submitted → confirmed
-                    → failed     (VM error, error_message populated)
-                    → expired    (on-chain expiration reached)
+queued → processing → submitted → confirmed
+                              → failed     (VM error, error_message populated)
+                              → expired    (on-chain expiration reached)
 ```
 
 **Errors:**
@@ -329,13 +368,14 @@ internal/
   aptos/
     abi.go                  ABI cache — fetches and caches module ABIs from Aptos node
     args.go                 BCS serialization — converts JSON arguments to BCS bytes by Move type
-    client.go               Aptos SDK wrapper — orderless txn building, fee-payer wrapping, submit, view
+    client.go               Aptos SDK wrapper — fee-payer wrapping with explicit sequence, submit, view
   circle/
     client.go               Circle HTTP client — RSA key cache, entity secret encryption, sign/transaction
     signer.go               Fee-payer transaction signing via Circle's sign/transaction endpoint
   handler/
     handler.go              Shared JSON response helpers
-    execute.go              POST /v1/execute — ABI resolve, BCS serialize, build, sign, submit
+    execute.go              POST /v1/execute — validate and enqueue transaction
+    submitter/              Background worker — sequence reconcile, build, sign, submit
     query.go                POST /v1/query — ABI resolve, BCS serialize, call view
     transaction.go          GET /v1/transactions/{id} — status lookup
   store/
@@ -354,12 +394,12 @@ examples/
 
 Per the [Circle Aptos Signing APIs Tutorial](https://developers.circle.com):
 
-1. Build entry function payload from untyped JSON arguments (ABI-resolved, BCS-serialized)
-2. Build fee-payer `RawTransactionWithData` via `BuildTransactionMultiAgent` with `FeePayer` option (sender = fee-payer = same wallet)
-3. BCS-serialize the `RawTransactionWithData` to hex
-4. Send to Circle `sign/transaction` with encrypted entity secret
-5. Get partial signature, build `FeePayerTransactionAuthenticator` (same signature for sender and fee-payer)
-6. Submit signed transaction to Aptos
+1. Load queued payload from MySQL; build entry function from ABI-resolved JSON arguments
+2. Reconcile Aptos account `sequence_number` with MySQL `account_sequences` (use the maximum)
+3. Build fee-payer `RawTransactionWithData` via `BuildTransactionMultiAgent` with `FeePayer`, explicit `SequenceNumber`, gas, and expiration
+4. BCS-serialize the `RawTransactionWithData` to hex
+5. Send to Circle `sign/transaction` with encrypted entity secret
+6. Build `FeePayerTransactionAuthenticator` and submit signed transaction to Aptos
 
 ### ABI Resolution
 
@@ -373,11 +413,9 @@ Both `/v1/execute` and `/v1/query` resolve argument types automatically:
 
 Supported Move types: `address`, `bool`, `u8`, `u16`, `u32`, `u64`, `u128`, `u256`, `0x1::string::String`, `vector<T>`, `0x1::object::Object<T>`.
 
-### In-Memory Store
+### Persistence and sequencing
 
-Transactions are tracked in memory with automatic TTL eviction. The default TTL (`STORE_TTL_SECONDS=180`) is longer than the on-chain expiry (`TXN_EXPIRATION_SECONDS=60`) to allow time for polling and webhook delivery. After eviction, `GET /v1/transactions/{id}` returns 404.
-
-The `Store` interface is defined separately from the implementation, so it can be swapped for a persistent backend (e.g. SQLite, Postgres) without changing any other code.
+Transactions and per-sender Aptos sequence state are stored in **MySQL**. `POST /v1/execute` inserts a `queued` row; the **submitter** worker claims work in FIFO order (by `created_at`), reconciles `account_sequences` with the on-chain account resource, builds a fee-payer transaction with an explicit sequence number, signs via Circle, and submits. The **poller** confirms or fails submitted transactions by hash.
 
 ## Make Targets
 

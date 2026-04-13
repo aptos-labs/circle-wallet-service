@@ -14,28 +14,31 @@ Generic REST API for interacting with Aptos Move contracts. Part of the Aptos La
 ```bash
 go build ./...
 go test ./...
-go test -run TestName ./path/to/package   # run a single test
+go test -run TestName ./path/to/package # run a single test
 go vet ./...
-make check                                 # fmt + vet + lint + test-race
+make check # fmt + vet + lint + unit tests
 ```
 
 ## API Endpoints
 
-- `POST /v1/contracts/execute` — Submit an entry function transaction (async, 202)
-- `POST /v1/contracts/query` — Call a view function (sync, 200)
+- `POST /v1/execute` — Enqueue an entry function transaction (202, `status: queued`)
+- `POST /v1/query` — Call a view function (sync, 200)
 - `GET /v1/transactions/{id}` — Poll transaction status
-- `GET /v1/health` — Health check
+- `GET /v1/health` — Health check (`?deep=1` pings MySQL)
 
 ## Key Architecture
 
-- **ABI Cache** (`internal/aptos/abi.go`): Fetches and caches module ABIs from the Aptos node to resolve argument types at runtime
-- **BCS Serializer** (`internal/aptos/args.go`): Generic type-directed serialization from JSON values to BCS bytes
-- **Execute Handler** (`internal/api/handler/execute.go`): Builds entry function payloads from untyped JSON arguments
-- **Query Handler** (`internal/api/handler/query.go`): Proxies view function calls to the Aptos node's /view endpoint
-- **Transaction Manager** (`internal/txn/`): Async submission with retry, polling, and persistence
-- **Signer Interface** (`internal/signer/`): Local keys or Circle Programmable Wallets
+- **ABI Cache** (`internal/aptos/abi.go`): Fetches and caches module ABIs from the Aptos node
+- **Execute Handler** (`internal/handler/execute.go`): Validates requests and inserts `queued` rows in MySQL
+- **Submitter** (`internal/submitter/`): Background worker — sequence reconcile, build, Circle sign, submit
+- **MySQL Store** (`internal/store/mysql/`): Transactions + `account_sequences`
+- **Migrations** (`internal/db/migrations/`): Embedded SQL; applied on server startup
+- **Query Handler** (`internal/handler/query.go`): Proxies view calls to the Aptos node `/view` endpoint
+- **Poller** (`internal/poller/`): Confirms submitted transactions by hash
+- **Circle Signer** (`internal/circle/`): `sign/transaction` for Aptos fee-payer payloads
 
 ## Environment
 
-- `.env` files are gitignored — use `.env` for local secrets (API keys, RPC endpoints)
+- `.env` files are gitignored — use `.env` for local secrets (API keys, `MYSQL_DSN`, RPC endpoints)
 - Never commit credentials or private keys
+- **MySQL is required** (`MYSQL_DSN`); migrations run automatically when the server starts

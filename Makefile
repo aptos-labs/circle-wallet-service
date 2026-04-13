@@ -11,10 +11,10 @@ help:
 	@sed -n 's/^## //p' $(MAKEFILE_LIST) | column -t -s ':'
 	@echo ""
 	@echo "Getting started:"
-	@echo "  1. cp .env.example .env      # configure credentials"
+	@echo "  1. cp .env.example .env      # configure MYSQL_DSN, API_KEY, Circle, Aptos"
 	@echo "  2. make create-wallets        # create Circle wallets"
 	@echo "  3. Fund wallet on testnet     # https://aptos.dev/en/network/faucet"
-	@echo "  4. make run                   # start the server"
+	@echo "  4. make run                   # start the server (runs DB migrations)"
 	@echo "  5. make test-e2e              # run e2e tests (in another terminal)"
 
 ## build: Build server and CLI binaries to bin/
@@ -34,9 +34,9 @@ cli:
 test:
 	go test ./internal/... -v
 
-## test-e2e: Run e2e tests (requires server running)
+## test-e2e: Run e2e tests (requires server running + MySQL)
 test-e2e:
-	go test ./examples/ -v -count=1
+	go test -tags=e2e ./examples/ -v -count=1
 
 ## test-all: Run unit + e2e tests
 test-all: test test-e2e

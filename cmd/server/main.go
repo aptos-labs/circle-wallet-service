@@ -15,11 +15,11 @@ import (
 	"github.com/aptos-labs/jc-contract-integration/internal/aptos"
 	circle2 "github.com/aptos-labs/jc-contract-integration/internal/circle"
 	"github.com/aptos-labs/jc-contract-integration/internal/config"
+	"github.com/aptos-labs/jc-contract-integration/internal/db"
 	handler2 "github.com/aptos-labs/jc-contract-integration/internal/handler"
-	"github.com/aptos-labs/jc-contract-integration/internal/idempotency"
-	"github.com/aptos-labs/jc-contract-integration/internal/nonce"
 	"github.com/aptos-labs/jc-contract-integration/internal/poller"
-	"github.com/aptos-labs/jc-contract-integration/internal/store"
+	"github.com/aptos-labs/jc-contract-integration/internal/store/mysql"
+	"github.com/aptos-labs/jc-contract-integration/internal/submitter"
 	"github.com/aptos-labs/jc-contract-integration/internal/webhook"
 )
 
@@ -37,6 +37,21 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+
+	if err := db.Migrate(cfg.MySQLDSN); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+
+	sqlDB, err := db.Open(cfg.MySQLDSN)
+	if err != nil {
+		return fmt.Errorf("mysql open: %w", err)
+	}
+	defer func() {
+		_ = sqlDB.Close()
+	}()
+
+	memStore := mysql.New(sqlDB)
+
 	logger.Info("config loaded",
 		"port", cfg.ServerPort,
 		"aptos_node", cfg.AptosNodeURL,
@@ -44,7 +59,6 @@ func run(logger *slog.Logger) error {
 		"testing_mode", cfg.TestingMode,
 	)
 
-	// Resolve public keys for wallets that don't have them configured
 	var circleClient *circle2.Client
 	var circleSigner *circle2.Signer
 	if cfg.CircleAPIKey != "" && cfg.CircleEntitySecret != "" {
@@ -70,10 +84,9 @@ func run(logger *slog.Logger) error {
 		}
 		circleSigner = circle2.NewSigner(circleClient, cfg.CircleEntitySecret)
 	} else {
-		logger.Warn("Circle credentials not fully configured; execute endpoint will not work")
+		logger.Warn("Circle credentials not fully configured; execute endpoint will not submit transactions")
 	}
 
-	// Initialize components
 	var aptosClient *aptos.Client
 	var abiCache *aptos.ABICache
 	if cfg.AptosNodeURL != "" {
@@ -83,34 +96,27 @@ func run(logger *slog.Logger) error {
 		}
 		abiCache = aptos.NewABICache(aptosClient.Inner)
 	} else {
-		logger.Warn("APTOS_NODE_URL not configured; execute and query endpoints will not work")
+		logger.Warn("APTOS_NODE_URL not configured; query endpoint will not work")
 	}
-	memStore := store.NewMemoryStore(time.Duration(cfg.StoreTTLSeconds) * time.Second)
-	defer func(memStore *store.MemoryStore) {
-		err := memStore.Close()
-		if err != nil {
-			os.Exit(1)
-		}
-	}(memStore)
-
-	nonceStore := nonce.NewStore(time.Duration(cfg.NonceTTLSeconds) * time.Second)
-	defer nonceStore.Close()
-
-	idempotencyStore := idempotency.NewStore(time.Duration(cfg.IdempotencyTTLSeconds) * time.Second)
-	defer idempotencyStore.Close()
 
 	notifier := webhook.NewNotifier(cfg.WebhookURL, logger)
 
-	logger.Info("features",
-		"orderless_enabled", cfg.OrderlessEnabled,
-		"nonce_ttl_seconds", cfg.NonceTTLSeconds,
-		"idempotency_ttl_seconds", cfg.IdempotencyTTLSeconds,
-	)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
-	// Build router
+	if aptosClient != nil && circleSigner != nil && abiCache != nil {
+		sub := submitter.New(cfg, memStore, aptosClient, abiCache, circleSigner, logger)
+		go sub.Run(ctx)
+	}
+
+	if aptosClient != nil {
+		txnPoller := poller.New(aptosClient, memStore, notifier, time.Duration(cfg.PollIntervalSeconds)*time.Second, logger)
+		go txnPoller.Run(ctx)
+	}
+
 	mux := http.NewServeMux()
 	if aptosClient != nil && circleSigner != nil {
-		mux.HandleFunc("POST /v1/execute", handler2.Execute(cfg, aptosClient, abiCache, circleSigner, memStore, nonceStore, idempotencyStore, logger))
+		mux.HandleFunc("POST /v1/execute", handler2.Execute(cfg, memStore, logger))
 	} else {
 		mux.HandleFunc("POST /v1/execute", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -130,13 +136,21 @@ func run(logger *slog.Logger) error {
 	mux.HandleFunc("GET /v1/transactions/{id}", handler2.GetTransaction(memStore))
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("deep") == "1" {
+			if err := sqlDB.PingContext(r.Context()); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"status":"error","db":"unreachable"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"status":"ok","db":"ok"}`))
+			return
+		}
 		_, err := w.Write([]byte(`{"status":"ok"}`))
 		if err != nil {
 			os.Exit(1)
 		}
 	})
 
-	// Auth middleware
 	var h http.Handler = mux
 	if !cfg.TestingMode {
 		apiKey := cfg.APIKey
@@ -163,14 +177,6 @@ func run(logger *slog.Logger) error {
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
-	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	if aptosClient != nil {
-		txnPoller := poller.New(aptosClient, memStore, notifier, time.Duration(cfg.PollIntervalSeconds)*time.Second, logger)
-		go txnPoller.Run(ctx)
 	}
 
 	go func() {
