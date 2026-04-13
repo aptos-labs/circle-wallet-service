@@ -137,13 +137,6 @@ func (c *Client) EncryptEntitySecret(ctx context.Context, entitySecretHex string
 	return base64.StdEncoding.EncodeToString(encrypted), nil
 }
 
-type SignMessageRequest struct {
-	WalletID               string `json:"walletId"`
-	Message                string `json:"message"`
-	EntitySecretCiphertext string `json:"entitySecretCiphertext"`
-	EncodedByHex           bool   `json:"encodedByHex"`
-}
-
 type SignTransactionForDeveloperRequest struct {
 	WalletID               string `json:"walletId"`
 	RawTransaction         string `json:"rawTransaction"`

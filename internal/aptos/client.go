@@ -35,7 +35,7 @@ func NewClient(nodeURL string, chainID uint8, expirationSec int64, maxGasAmount 
 	}, nil
 }
 
-// BuildTransaction builds an transaction wrapped as fee-payer
+// BuildTransaction builds a transaction wrapped as fee-payer
 // (sender = fee-payer = senderAddr). Returns the RawTransactionWithData for signing.
 func (c *Client) BuildTransaction(
 	senderAddr aptossdk.AccountAddress,
@@ -58,13 +58,14 @@ func (c *Client) BuildTransaction(
 	return rawTxn, nil
 }
 
-// BuildFeePayerTransaction builds an transaction wrapped as fee-payer
-// (sender = fee-payer = senderAddr). Returns the RawTransactionWithData for signing.
+// BuildFeePayerTransaction builds a fee-payer transaction (sender = fee-payer).
+// sequenceNumber is the Aptos account sequence to embed (managed by the caller / DB).
 func (c *Client) BuildFeePayerTransaction(
 	senderAddr aptossdk.AccountAddress,
 	feePayerAddr aptossdk.AccountAddress,
 	payload aptossdk.TransactionPayload,
 	maxGasAmount uint64,
+	sequenceNumber uint64,
 ) (*aptossdk.RawTransactionWithData, error) {
 	gas := c.maxGasAmount
 	if maxGasAmount > 0 {
@@ -73,6 +74,7 @@ func (c *Client) BuildFeePayerTransaction(
 
 	rawTxn, err := c.Inner.BuildTransactionMultiAgent(senderAddr, payload,
 		aptossdk.FeePayer(&feePayerAddr),
+		aptossdk.SequenceNumber(sequenceNumber),
 		aptossdk.ExpirationSeconds(c.expirationSec),
 		aptossdk.MaxGasAmount(gas),
 	)
@@ -80,88 +82,6 @@ func (c *Client) BuildFeePayerTransaction(
 		return nil, fmt.Errorf("build transaction: %w", err)
 	}
 
-	return rawTxn, nil
-}
-
-// BuildOrderlessTransaction builds a transaction that uses a replay-protection
-// nonce instead of an ordered sequence number. This allows transactions to be
-// submitted in any order without maintaining a sequence counter.
-func (c *Client) BuildOrderlessTransaction(
-	senderAddr aptossdk.AccountAddress,
-	entryFn *aptossdk.EntryFunction,
-	replayNonce uint64,
-	maxGasAmount uint64,
-) (*aptossdk.RawTransaction, error) {
-	gas := c.maxGasAmount
-	if maxGasAmount > 0 {
-		gas = maxGasAmount
-	}
-
-	payload := aptossdk.TransactionPayload{
-		Payload: &aptossdk.TransactionInnerPayload{
-			Payload: &aptossdk.TransactionInnerPayloadV1{
-				Executable: aptossdk.TransactionExecutable{
-					Inner: entryFn,
-				},
-				ExtraConfig: aptossdk.TransactionExtraConfig{
-					Inner: &aptossdk.TransactionExtraConfigV1{
-						MultisigAddress:       nil,
-						ReplayProtectionNonce: &replayNonce,
-					},
-				},
-			},
-		},
-	}
-
-	rawTxn, err := c.Inner.BuildTransaction(senderAddr, payload,
-		aptossdk.ExpirationSeconds(c.expirationSec),
-		aptossdk.MaxGasAmount(gas),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("build orderless transaction: %w", err)
-	}
-	return rawTxn, nil
-}
-
-// BuildOrderlessFeePayerTransaction builds an orderless transaction with a
-// fee-payer wrapper. It combines nonce-based replay protection with sponsored
-// gas payment.
-func (c *Client) BuildOrderlessFeePayerTransaction(
-	senderAddr aptossdk.AccountAddress,
-	feePayerAddr aptossdk.AccountAddress,
-	entryFn *aptossdk.EntryFunction,
-	replayNonce uint64,
-	maxGasAmount uint64,
-) (*aptossdk.RawTransactionWithData, error) {
-	gas := c.maxGasAmount
-	if maxGasAmount > 0 {
-		gas = maxGasAmount
-	}
-
-	payload := aptossdk.TransactionPayload{
-		Payload: &aptossdk.TransactionInnerPayload{
-			Payload: &aptossdk.TransactionInnerPayloadV1{
-				Executable: aptossdk.TransactionExecutable{
-					Inner: entryFn,
-				},
-				ExtraConfig: aptossdk.TransactionExtraConfig{
-					Inner: &aptossdk.TransactionExtraConfigV1{
-						MultisigAddress:       nil,
-						ReplayProtectionNonce: &replayNonce,
-					},
-				},
-			},
-		},
-	}
-
-	rawTxn, err := c.Inner.BuildTransactionMultiAgent(senderAddr, payload,
-		aptossdk.FeePayer(&feePayerAddr),
-		aptossdk.ExpirationSeconds(c.expirationSec),
-		aptossdk.MaxGasAmount(gas),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("build orderless fee-payer transaction: %w", err)
-	}
 	return rawTxn, nil
 }
 

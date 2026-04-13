@@ -59,21 +59,20 @@ func (s *Signer) SignTransaction(
 		return nil, fmt.Errorf("circle sign/transaction: %w", err)
 	}
 
-	// 4. Decode signature
+	return s.accountAuthenticatorFromCircle(signResp, pubKeyHex)
+}
+
+func (s *Signer) accountAuthenticatorFromCircle(signResp *SignMessageResponse, pubKeyHex string) (*crypto.AccountAuthenticator, error) {
 	sig := &crypto.Ed25519Signature{}
-	err = sig.FromHex(signResp.Data.Signature)
+	err := sig.FromHex(signResp.Data.Signature)
 	if err != nil {
 		return nil, fmt.Errorf("bad signature: %w", err)
 	}
-
-	// 5. Decode public key
 	pubKey := &crypto.Ed25519PublicKey{}
 	err = pubKey.FromHex(pubKeyHex)
 	if err != nil {
 		return nil, fmt.Errorf("bad public key: %w", err)
 	}
-
-	// 6. Build AccountAuthenticator
 	auth := &crypto.AccountAuthenticator{}
 	err = auth.FromKeyAndSignature(pubKey, sig)
 	if err != nil {

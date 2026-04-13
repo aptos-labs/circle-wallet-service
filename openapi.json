@@ -3,7 +3,7 @@
   "info": {
     "title": "Contract API",
     "version": "2.0.0",
-    "description": "Generic REST API for interacting with Aptos Move contracts.\n\n## Endpoints\n\n- **POST /v1/contracts/execute** — Submit an entry function transaction (async)\n- **POST /v1/contracts/query** — Call a view function (sync)\n- **GET /v1/transactions/{id}** — Poll transaction status\n\n## Async Submission Model\n\nExecute requests return `202 Accepted` with a `transaction_id`. The transaction is submitted to the Aptos blockchain and processed in the background. Use `GET /v1/transactions/{id}` to poll for the final status.\n\n### Transaction Lifecycle\n\n1. **pending** — Accepted by the API, queued for submission\n2. **submitted** — Sent to the Aptos blockchain, awaiting confirmation\n3. **confirmed** — Successfully committed on-chain\n4. **failed** — Transaction failed (may be retried automatically)\n5. **expired** — Transaction expired before confirmation\n6. **permanently_failed** — Unrecoverable failure after all retries exhausted\n\n## Authentication\n\nAll endpoints except `/v1/health` and `/v1/openapi.yaml` require an API key passed in the `Authorization` header. Requests without a valid key receive `401 Unauthorized`.\n\n## Error Handling\n\nErrors return a JSON body with a single `error` field:\n```json\n{\"error\": \"description of the problem\"}\n```\n\n## Arguments\n\nArguments are untyped (strings, numbers, arrays) — matching the native Aptos REST API convention. The server resolves argument types by fetching the module ABI from the Aptos node (cached per module) and handles BCS serialization automatically.\n\nSupported Move types: `address`, `bool`, `u8`–`u256`, `0x1::string::String`, `vector\u003cT\u003e`, `0x1::object::Object\u003cT\u003e`.\n\n## Address Format\n\nAll address parameters accept Aptos account addresses as hex strings (e.g., `0x1`). Addresses are validated on the server side; invalid addresses return `400 Bad Request`.\n\n## Request Validation\n\n- Request bodies must be valid JSON with `Content-Type: application/json`\n- Unknown fields in the request body are rejected (`400 Bad Request`)\n- Missing required fields return `400 Bad Request` with a descriptive message"
+    "description": "Generic REST API for interacting with Aptos Move contracts.\n\n## Endpoints\n\n- **POST /v1/execute** — Enqueue an entry function transaction (returns `202` with `queued`)\n- **POST /v1/query** — Call a view function (sync)\n- **GET /v1/transactions/{id}** — Poll transaction status\n\n## Async Submission Model\n\nExecute requests return `202 Accepted` with a `transaction_id` and `status: queued`. A background worker signs and submits to Aptos in FIFO order per sender. Use `GET /v1/transactions/{id}` to poll until `submitted` or `confirmed`.\n\n### Transaction Lifecycle\n\n1. **queued** — Persisted in MySQL, waiting for the submitter\n2. **processing** — Claimed by a worker (build/sign/submit in progress)\n3. **submitted** — Sent to the Aptos blockchain, awaiting confirmation\n4. **confirmed** — Successfully committed on-chain\n5. **failed** — Submission or confirmation failed (may be retried)\n6. **expired** — Transaction expired before confirmation\n\n## Authentication\n\nAll endpoints except `/v1/health` and `/v1/openapi.yaml` require an API key passed in the `Authorization` header. Requests without a valid key receive `401 Unauthorized`.\n\n## Error Handling\n\nErrors return a JSON body with a single `error` field:\n```json\n{\"error\": \"description of the problem\"}\n```\n\n## Arguments\n\nArguments are untyped (strings, numbers, arrays) — matching the native Aptos REST API convention. The server resolves argument types by fetching the module ABI from the Aptos node (cached per module) and handles BCS serialization automatically.\n\nSupported Move types: `address`, `bool`, `u8`–`u256`, `0x1::string::String`, `vector\u003cT\u003e`, `0x1::object::Object\u003cT\u003e`.\n\n## Address Format\n\nAll address parameters accept Aptos account addresses as hex strings (e.g., `0x1`). Addresses are validated on the server side; invalid addresses return `400 Bad Request`.\n\n## Request Validation\n\n- Request bodies must be valid JSON with `Content-Type: application/json`\n- Unknown fields in the request body are rejected (`400 Bad Request`)\n- Missing required fields return `400 Bad Request` with a descriptive message"
   },
   "tags": [
     {
@@ -24,7 +24,7 @@
     }
   ],
   "paths": {
-    "/v1/contracts/execute": {
+    "/v1/execute": {
       "post": {
         "operationId": "executeContract",
         "summary": "Execute an entry function",
@@ -87,7 +87,7 @@
         }
       }
     },
-    "/v1/contracts/query": {
+    "/v1/query": {
       "post": {
         "operationId": "queryContract",
         "summary": "Call a view function",
@@ -374,8 +374,8 @@
         "properties": {
           "status": {
             "type": "string",
-            "description": "Initial transaction status (always \"pending\" on creation)",
-            "example": "pending"
+            "description": "Initial transaction status after enqueue (always \"queued\" until the submitter runs)",
+            "example": "queued"
           },
           "transaction_id": {
             "type": "string",
@@ -411,9 +411,10 @@
             "type": "integer",
             "description": "Maximum number of retry attempts before the transaction is marked permanently_failed"
           },
-          "nonce": {
+          "sequence_number": {
             "type": "integer",
-            "description": "Orderless replay-protection nonce used for this transaction"
+            "format": "uint64",
+            "description": "Aptos account sequence number used when the transaction was built (set after submission)"
           },
           "operation_type": {
             "type": "string",
@@ -431,12 +432,12 @@
             "type": "string",
             "description": "Current lifecycle status of the transaction",
             "enum": [
-              "pending",
+              "queued",
+              "processing",
               "submitted",
               "confirmed",
               "failed",
-              "expired",
-              "permanently_failed"
+              "expired"
             ]
           },
           "txn_hash": {
