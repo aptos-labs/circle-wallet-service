@@ -118,6 +118,14 @@ func Execute(
 			return
 		}
 
+		// Validate inline wallet the same way config-loaded wallets are verified.
+		if req.Wallet != nil {
+			if err := wallet.VerifyWallet(); err != nil {
+				errorResponse(w, http.StatusBadRequest, "invalid wallet: "+err.Error())
+				return
+			}
+		}
+
 		// --- Determine orderless mode -------------------------------------------
 		orderless := cfg.OrderlessEnabled
 		if req.Orderless != nil {
@@ -142,17 +150,21 @@ func Execute(
 			maxGas = *req.MaxGasAmount
 		}
 
+		// Use canonical long-form address for nonce tracking to avoid
+		// case/format mismatches treating the same account as different.
+		canonicalAddr := senderAddr.StringLong()
+
 		// --- Build transaction (ordered vs orderless) ---------------------------
-		var replayNonce *uint64
+		var replayNonce string
 		var rawTxnWithData *aptossdk.RawTransactionWithData
 		if orderless {
-			n, err := nonceStore.Generate(wallet.Address)
+			n, err := nonceStore.Generate(canonicalAddr)
 			if err != nil {
 				logger.Error("nonce generation failed", "error", err)
 				errorResponse(w, http.StatusInternalServerError, "failed to generate replay nonce")
 				return
 			}
-			replayNonce = &n
+			replayNonce = store.FormatNonce(n)
 
 			rawTxnWithData, err = client.BuildOrderlessFeePayerTransaction(senderAddr, senderAddr, entryFunction, n, maxGas)
 			if err != nil {
@@ -193,7 +205,7 @@ func Execute(
 			ID:             uuid.New().String(),
 			IdempotencyKey: idempKey,
 			Status:         store.StatusPending,
-			SenderAddress:  wallet.Address,
+			SenderAddress:  canonicalAddr,
 			FunctionID:     req.FunctionID,
 			WalletID:       wallet.WalletID,
 			Orderless:      orderless,
@@ -210,15 +222,12 @@ func Execute(
 		}
 
 		// --- Verify signature (best-effort logging) -----------------------------
-		pubkey := &crypto.Ed25519PublicKey{}
-		if err := pubkey.FromHex(wallet.PublicKey); err == nil {
-			if err := signedTxn.Verify(); err != nil {
-				logger.Error("failed to verify signed transaction", "error", err)
-			}
-			if msg, err := rawTxnWithData.SigningMessage(); err == nil {
-				if !signedTxn.Authenticator.Verify(msg) {
-					logger.Error("authenticator verification failed")
-				}
+		if err := signedTxn.Verify(); err != nil {
+			logger.Error("failed to verify signed transaction", "error", err)
+		}
+		if msg, err := rawTxnWithData.SigningMessage(); err == nil {
+			if !signedTxn.Authenticator.Verify(msg) {
+				logger.Error("authenticator verification failed")
 			}
 		}
 
@@ -247,16 +256,26 @@ func Execute(
 			"txn_hash":       rec.TxnHash,
 			"orderless":      orderless,
 		}
-		if replayNonce != nil {
-			respBody["replay_nonce"] = *replayNonce
+		if replayNonce != "" {
+			respBody["replay_nonce"] = replayNonce
 		}
 
-		// Cache idempotent response
+		// Marshal once so the exact bytes are used for both the HTTP response
+		// and the idempotency cache (avoids trailing-newline mismatch from
+		// json.Encoder.Encode vs json.Marshal).
+		bodyBytes, err := json.Marshal(respBody)
+		if err != nil {
+			logger.Error("marshal response failed", "error", err)
+			errorResponse(w, http.StatusInternalServerError, "failed to encode response")
+			return
+		}
+
 		if idempKey != "" {
-			bodyBytes, _ := json.Marshal(respBody)
 			idempotencyStore.Set(idempKey, http.StatusAccepted, bodyBytes)
 		}
 
-		jsonResponse(w, http.StatusAccepted, respBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write(bodyBytes)
 	}
 }

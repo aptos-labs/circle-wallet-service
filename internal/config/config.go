@@ -144,6 +144,12 @@ func (c *Config) validate() error {
 	if c.TxnExpirationSeconds <= 0 {
 		return fmt.Errorf("TXN_EXPIRATION_SECONDS must be greater than 0")
 	}
+	if c.NonceTTLSeconds < 60 {
+		return fmt.Errorf("NONCE_TTL_SECONDS must be >= 60 (the Aptos chain replay-protection window)")
+	}
+	if c.IdempotencyTTLSeconds <= 0 {
+		return fmt.Errorf("IDEMPOTENCY_TTL_SECONDS must be greater than 0")
+	}
 	return nil
 }
 
