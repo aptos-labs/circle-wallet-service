@@ -1,3 +1,5 @@
+//go:build e2e
+
 // Package examples provides end-to-end tests against a live server.
 //
 // Usage:

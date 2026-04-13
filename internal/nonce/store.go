@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const maxGenerateAttempts = 4
+
 type entry struct {
 	createdAt time.Time
 }
@@ -35,29 +37,34 @@ func NewStore(ttl time.Duration) *Store {
 }
 
 // Generate creates a cryptographically random nonce for the given address
-// and records it. Returns the nonce or an error if the random source fails.
+// and records it. Retries up to maxGenerateAttempts times on the extremely
+// unlikely event of a collision.
 func (s *Store) Generate(address string) (uint64, error) {
-	var buf [8]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return 0, fmt.Errorf("generate nonce: %w", err)
+	for attempt := range maxGenerateAttempts {
+		var buf [8]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			return 0, fmt.Errorf("generate nonce: %w", err)
+		}
+		nonce := binary.LittleEndian.Uint64(buf[:])
+
+		s.mu.Lock()
+		addrMap, ok := s.used[address]
+		if !ok {
+			addrMap = make(map[uint64]entry)
+			s.used[address] = addrMap
+		}
+
+		if _, exists := addrMap[nonce]; !exists {
+			addrMap[nonce] = entry{createdAt: time.Now()}
+			s.mu.Unlock()
+			return nonce, nil
+		}
+		s.mu.Unlock()
+
+		_ = attempt // consumed by range
 	}
-	nonce := binary.LittleEndian.Uint64(buf[:])
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	addrMap, ok := s.used[address]
-	if !ok {
-		addrMap = make(map[uint64]entry)
-		s.used[address] = addrMap
-	}
-
-	if _, exists := addrMap[nonce]; exists {
-		return 0, fmt.Errorf("nonce collision for address %s (extremely unlikely — retry)", address)
-	}
-
-	addrMap[nonce] = entry{createdAt: time.Now()}
-	return nonce, nil
+	return 0, fmt.Errorf("generate nonce: exhausted %d attempts for address %s", maxGenerateAttempts, address)
 }
 
 // IsUsed checks whether the given nonce has already been consumed for the address.

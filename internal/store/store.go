@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -24,12 +25,18 @@ type TransactionRecord struct {
 	FunctionID     string    `json:"function_id"`
 	WalletID       string    `json:"wallet_id"`
 	Orderless      bool      `json:"orderless"`
-	ReplayNonce    *uint64   `json:"replay_nonce,omitempty"`
+	ReplayNonce    string    `json:"replay_nonce,omitempty"`
 	ErrorMessage   string    `json:"error_message,omitempty"`
 	WebhookURL     string    `json:"webhook_url,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	ExpiresAt      time.Time `json:"expires_at"`
+}
+
+// FormatNonce converts a uint64 nonce to its string representation for
+// safe JSON serialization (avoids JavaScript number precision loss).
+func FormatNonce(n uint64) string {
+	return fmt.Sprintf("%d", n)
 }
 
 type Store interface {

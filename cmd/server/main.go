@@ -47,7 +47,7 @@ func run(logger *slog.Logger) error {
 	// Resolve public keys for wallets that don't have them configured
 	var circleClient *circle2.Client
 	var circleSigner *circle2.Signer
-	if cfg.CircleAPIKey != "" {
+	if cfg.CircleAPIKey != "" && cfg.CircleEntitySecret != "" {
 		circleClient = circle2.NewClient(cfg.CircleAPIKey)
 		for i := range cfg.CircleWallets {
 			w := &cfg.CircleWallets[i]
@@ -70,7 +70,7 @@ func run(logger *slog.Logger) error {
 		}
 		circleSigner = circle2.NewSigner(circleClient, cfg.CircleEntitySecret)
 	} else {
-		logger.Warn("Circle credentials not configured; execute endpoint will not work")
+		logger.Warn("Circle credentials not fully configured; execute endpoint will not work")
 	}
 
 	// Initialize components
