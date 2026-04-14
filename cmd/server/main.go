@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -144,7 +145,7 @@ func run(logger *slog.Logger) error {
 
 	var h http.Handler = mux
 	if !cfg.TestingMode() {
-		apiKey := cfg.APIKey()
+		apiKeyBytes := []byte(cfg.APIKey())
 		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/v1/health" {
 				mux.ServeHTTP(w, r)
@@ -154,8 +155,11 @@ func run(logger *slog.Logger) error {
 			if auth == "" {
 				auth = r.Header.Get("X-API-Key")
 			}
-			if auth != apiKey && auth != "Bearer "+apiKey {
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			key := extractBearerToken(auth)
+			if subtle.ConstantTimeCompare([]byte(key), apiKeyBytes) != 1 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 				return
 			}
 			mux.ServeHTTP(w, r)
@@ -199,4 +203,12 @@ func run(logger *slog.Logger) error {
 	}
 	logger.Info("server stopped")
 	return nil
+}
+
+func extractBearerToken(header string) string {
+	const prefix = "Bearer "
+	if len(header) > len(prefix) && header[:len(prefix)] == prefix {
+		return header[len(prefix):]
+	}
+	return header
 }

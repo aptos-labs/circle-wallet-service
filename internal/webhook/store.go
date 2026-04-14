@@ -10,7 +10,7 @@ type DeliveryRecord struct {
 	TransactionID string
 	URL           string
 	Payload       string // JSON
-	Status        string // pending, delivered, failed
+	Status        string // pending, delivering, delivered, failed
 	Attempts      int
 	LastAttemptAt *time.Time
 	LastError     string
@@ -23,4 +23,5 @@ type WebhookStore interface {
 	ClaimPendingDeliveries(ctx context.Context, limit int) ([]*DeliveryRecord, error)
 	UpdateDelivery(ctx context.Context, rec *DeliveryRecord) error
 	ListByTransactionID(ctx context.Context, txnID string) ([]*DeliveryRecord, error)
+	RecoverStaleDeliveries(ctx context.Context, olderThan time.Duration) (int64, error)
 }

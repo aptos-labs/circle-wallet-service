@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aptos-labs/jc-contract-integration/internal/aptos"
@@ -57,23 +58,27 @@ func Execute(cfg *config.Config, st store.Store, logger *slog.Logger) http.Handl
 			}
 		}
 
-	if req.WebhookURL != "" {
-		if err := ValidateWebhookURL(req.WebhookURL); err != nil {
-			errorResponse(w, http.StatusBadRequest, err.Error())
+		if req.WebhookURL != "" {
+			if err := ValidateWebhookURL(req.WebhookURL); err != nil {
+				errorResponse(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+
+		if req.WalletID == "" {
+			errorResponse(w, http.StatusBadRequest, "wallet_id is required")
 			return
 		}
-	}
-
-	if req.WalletID == "" {
-		errorResponse(w, http.StatusBadRequest, "wallet_id is required")
-		return
-	}
 		if req.Address == "" {
 			errorResponse(w, http.StatusBadRequest, "address is required")
 			return
 		}
 		if req.FunctionID == "" {
 			errorResponse(w, http.StatusBadRequest, "function_id is required")
+			return
+		}
+		if parts := strings.Split(req.FunctionID, "::"); len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+			errorResponse(w, http.StatusBadRequest, "function_id must be in format <address>::<module>::<function>")
 			return
 		}
 

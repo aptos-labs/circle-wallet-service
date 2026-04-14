@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/aptos-labs/jc-contract-integration/internal/store"
 )
@@ -62,6 +63,10 @@ func (m *mockWebhookStore) ListByTransactionID(_ context.Context, txnID string) 
 	return m.listByTxn[txnID], nil
 }
 
+func (m *mockWebhookStore) RecoverStaleDeliveries(_ context.Context, _ time.Duration) (int64, error) {
+	return 0, nil
+}
+
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -79,7 +84,7 @@ func TestNotifyInsertsRecord(t *testing.T) {
 		WalletID:      "w1",
 		WebhookURL:    "https://hooks.example/r",
 	}
-	n.Notify(rec)
+	n.Notify(context.Background(), rec)
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 	if len(ms.deliveries) != 1 {
@@ -109,7 +114,7 @@ func TestNotifyUsesGlobalURL(t *testing.T) {
 		FunctionID:    "0x1::m::f",
 		WalletID:      "w",
 	}
-	n.Notify(rec)
+	n.Notify(context.Background(), rec)
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 	if len(ms.deliveries) != 1 {
@@ -131,7 +136,7 @@ func TestNotifyNoURL(t *testing.T) {
 		FunctionID:    "0x1::m::f",
 		WalletID:      "w",
 	}
-	n.Notify(rec)
+	n.Notify(context.Background(), rec)
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 	if len(ms.deliveries) != 0 {
@@ -151,7 +156,7 @@ func TestPayloadContainsExpectedFields(t *testing.T) {
 		FunctionID:    "0x2::mod::entry",
 		WalletID:      "w",
 	}
-	n.Notify(rec)
+	n.Notify(context.Background(), rec)
 	ms.mu.Lock()
 	if len(ms.deliveries) != 1 {
 		ms.mu.Unlock()
@@ -200,7 +205,7 @@ func TestNotifierPayloadFormat(t *testing.T) {
 		WalletID:      "w",
 		WebhookURL:    "https://hooks.example/r",
 	}
-	n.Notify(rec)
+	n.Notify(context.Background(), rec)
 	ms.mu.Lock()
 	if len(ms.deliveries) != 1 {
 		ms.mu.Unlock()
@@ -236,7 +241,7 @@ func TestNotifierPayloadFormatWithoutOptionalHashes(t *testing.T) {
 		WalletID:      "w",
 		WebhookURL:    "https://hooks.example/r",
 	}
-	n.Notify(rec)
+	n.Notify(context.Background(), rec)
 	ms.mu.Lock()
 	raw := ms.deliveries[0].Payload
 	ms.mu.Unlock()

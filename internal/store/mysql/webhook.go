@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"github.com/aptos-labs/jc-contract-integration/internal/webhook"
 )
@@ -16,6 +17,23 @@ func (s *Store) CreateDelivery(ctx context.Context, rec *webhook.DeliveryRecord)
 		rec.NextRetryAt, rec.CreatedAt,
 	)
 	return err
+}
+
+// RecoverStaleDeliveries resets 'delivering' rows older than the given threshold back to 'pending'.
+func (s *Store) RecoverStaleDeliveries(ctx context.Context, olderThan time.Duration) (int64, error) {
+	sec := int64(olderThan / time.Second)
+	if sec < 1 {
+		sec = 1
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE webhook_deliveries
+		SET status = 'pending'
+		WHERE status = 'delivering' AND last_attempt_at < (UTC_TIMESTAMP(3) - INTERVAL ? SECOND)
+	`, sec)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) ClaimPendingDeliveries(ctx context.Context, limit int) ([]*webhook.DeliveryRecord, error) {

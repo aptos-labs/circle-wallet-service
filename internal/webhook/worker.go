@@ -55,13 +55,34 @@ func ssrfSafeDialer(timeout time.Duration) func(ctx context.Context, network, ad
 func (w *Worker) Run(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
+
+	recoveryTicker := time.NewTicker(30 * time.Second)
+	defer recoveryTicker.Stop()
+
+	w.recoverStale(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-recoveryTicker.C:
+			w.recoverStale(ctx)
 		case <-ticker.C:
 			w.processBatch(ctx)
 		}
+	}
+}
+
+const staleDeliveryThreshold = 5 * time.Minute
+
+func (w *Worker) recoverStale(ctx context.Context) {
+	n, err := w.store.RecoverStaleDeliveries(ctx, staleDeliveryThreshold)
+	if err != nil {
+		w.logger.Error("webhook worker: recover stale deliveries", "error", err)
+		return
+	}
+	if n > 0 {
+		w.logger.Info("webhook worker: recovered stale delivering rows", "count", n)
 	}
 }
 
@@ -105,6 +126,10 @@ func (w *Worker) deliver(ctx context.Context, rec *DeliveryRecord) {
 		return
 	}
 
+	if resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooManyRequests {
+		w.handleRetry(ctx, rec, fmt.Sprintf("retryable client error: %d", resp.StatusCode))
+		return
+	}
 	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 		rec.Status = "failed"
 		rec.LastError = fmt.Sprintf("client error: %d", resp.StatusCode)

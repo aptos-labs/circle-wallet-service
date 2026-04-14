@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/aptos-labs/jc-contract-integration/internal/store"
 	"github.com/go-sql-driver/mysql"
@@ -87,7 +86,7 @@ func (s *Store) Update(ctx context.Context, rec *store.TransactionRecord) error 
 		string(rec.Status), nullU64(rec.SequenceNumber),
 		rec.FunctionID, rec.PayloadJSON, maxGas, idemp, nullStr(rec.TxnHash),
 		nullStr(rec.ErrorMessage), nullStr(rec.WebhookURL), rec.AttemptCount, nullStr(rec.LastError),
-		time.Now().UTC(), rec.ExpiresAt, rec.ID,
+		rec.UpdatedAt, rec.ExpiresAt, rec.ID,
 	)
 	if err != nil {
 		return err
@@ -126,7 +125,7 @@ func (s *Store) UpdateIfStatus(ctx context.Context, rec *store.TransactionRecord
 		string(rec.Status), nullU64(rec.SequenceNumber),
 		rec.FunctionID, rec.PayloadJSON, maxGas, idemp, nullStr(rec.TxnHash),
 		nullStr(rec.ErrorMessage), nullStr(rec.WebhookURL), rec.AttemptCount, nullStr(rec.LastError),
-		time.Now().UTC(), rec.ExpiresAt, rec.ID, string(expected),
+		rec.UpdatedAt, rec.ExpiresAt, rec.ID, string(expected),
 	)
 	if err != nil {
 		return false, err
