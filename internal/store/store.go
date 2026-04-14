@@ -22,16 +22,16 @@ var ErrIdempotencyConflict = errors.New("idempotency key already exists")
 
 // TransactionRecord is persisted for API responses and the submitter worker.
 type TransactionRecord struct {
-	ID             string    `json:"id"`
-	IdempotencyKey string    `json:"idempotency_key,omitempty"`
-	Status         TxnStatus `json:"status"`
-	TxnHash        string    `json:"txn_hash,omitempty"`
-	SenderAddress  string    `json:"sender_address"`
-	FunctionID     string    `json:"function_id"`
-	WalletID         string `json:"wallet_id"`
-	FeePayerWalletID string `json:"fee_payer_wallet_id,omitempty"`
-	FeePayerAddress  string `json:"fee_payer_address,omitempty"`
-	PayloadJSON      string `json:"payload_json,omitempty"`
+	ID               string    `json:"id"`
+	IdempotencyKey   string    `json:"idempotency_key,omitempty"`
+	Status           TxnStatus `json:"status"`
+	TxnHash          string    `json:"txn_hash,omitempty"`
+	SenderAddress    string    `json:"sender_address"`
+	FunctionID       string    `json:"function_id"`
+	WalletID         string    `json:"wallet_id"`
+	FeePayerWalletID string    `json:"fee_payer_wallet_id,omitempty"`
+	FeePayerAddress  string    `json:"fee_payer_address,omitempty"`
+	PayloadJSON      string    `json:"payload_json,omitempty"`
 	// SequenceNumber is set when the transaction is built for submit (Aptos account sequence).
 	SequenceNumber *uint64   `json:"sequence_number,omitempty"`
 	MaxGasAmount   *uint64   `json:"max_gas_amount,omitempty"`

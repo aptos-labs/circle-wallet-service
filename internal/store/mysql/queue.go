@@ -218,7 +218,7 @@ func (s *Store) RecoverStaleProcessing(ctx context.Context, olderThan time.Durat
 // ShiftSenderSequences resets transactions with a sequence number higher than
 // the failed one back to queued so they can be re-signed with correct sequences.
 func (s *Store) ShiftSenderSequences(ctx context.Context, senderAddress string, failedSeqNum uint64) error {
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE transactions 
 		SET sequence_number = NULL, status = 'queued', updated_at = UTC_TIMESTAMP(3)
 		WHERE sender_address = ? AND sequence_number > ? AND status IN ('queued', 'processing')
@@ -226,11 +226,18 @@ func (s *Store) ShiftSenderSequences(ctx context.Context, senderAddress string, 
 	if err != nil {
 		return err
 	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE account_sequences 
-		SET next_sequence = GREATEST(next_sequence - 1, 0), updated_at = UTC_TIMESTAMP(3)
+		SET next_sequence = GREATEST(next_sequence - ?, 0), updated_at = UTC_TIMESTAMP(3)
 		WHERE sender_address = ?
-	`, senderAddress)
+	`, n, senderAddress)
 	return err
 }
 

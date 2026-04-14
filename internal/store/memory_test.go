@@ -338,4 +338,3 @@ func TestMemoryStore_FeePayerFields(t *testing.T) {
 		t.Errorf("FeePayerAddress = %q", got.FeePayerAddress)
 	}
 }
-

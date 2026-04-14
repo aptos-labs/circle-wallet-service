@@ -56,6 +56,7 @@ type stubStore struct {
 func (s *stubStore) Create(context.Context, *store.TransactionRecord) error {
 	return errors.New("stub")
 }
+
 func (s *stubStore) Update(context.Context, *store.TransactionRecord) error {
 	return errors.New("stub")
 }

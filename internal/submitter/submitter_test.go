@@ -335,12 +335,15 @@ func (m *mockQueue) Create(ctx context.Context, rec *store.TransactionRecord) er
 func (m *mockQueue) UpdateIfStatus(ctx context.Context, rec *store.TransactionRecord, expectedStatus store.TxnStatus) (bool, error) {
 	return false, nil
 }
+
 func (m *mockQueue) Get(ctx context.Context, id string) (*store.TransactionRecord, error) {
 	return nil, nil
 }
+
 func (m *mockQueue) GetByIdempotencyKey(ctx context.Context, key string) (*store.TransactionRecord, error) {
 	return nil, nil
 }
+
 func (m *mockQueue) ListByStatus(ctx context.Context, status store.TxnStatus) ([]*store.TransactionRecord, error) {
 	return nil, nil
 }
@@ -464,13 +467,13 @@ func TestRunSenderWorker(t *testing.T) {
 				MaxRetryDurationSeconds: 600,
 			},
 		},
-		queue:     mq,
-		client:    nil,
-		abi:       aptos.NewABICache(nil),
-		signer:    nil,
-		pkCache:   pkCache,
-		notifier:  noopNotifier{},
-		logger:    slog.New(slog.DiscardHandler),
+		queue:    mq,
+		client:   nil,
+		abi:      aptos.NewABICache(nil),
+		signer:   nil,
+		pkCache:  pkCache,
+		notifier: noopNotifier{},
+		logger:   slog.New(slog.DiscardHandler),
 	}
 	s.runSenderWorker(context.Background(), senderAddr)
 	if nCalls.Load() < 2 {

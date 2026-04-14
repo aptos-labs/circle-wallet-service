@@ -41,9 +41,9 @@ func (wallet *CircleWallet) VerifyWallet() error {
 }
 
 type ServerConfig struct {
-	Port         int    `yaml:"port"`
-	TestingMode  bool   `yaml:"testing_mode"`
-	APIKey       string `yaml:"api_key,omitempty"`
+	Port        int    `yaml:"port"`
+	TestingMode bool   `yaml:"testing_mode"`
+	APIKey      string `yaml:"api_key,omitempty"`
 }
 
 type MySQLConfig struct {
@@ -66,13 +66,13 @@ type TransactionConfig struct {
 }
 
 type SubmitterConfig struct {
-	PollIntervalMs             int `yaml:"poll_interval_ms"`
-	MaxRetryDurationSeconds    int `yaml:"max_retry_duration_seconds"`
-	RetryIntervalSeconds       int `yaml:"retry_interval_seconds"`
-	RetryJitterSeconds         int `yaml:"retry_jitter_seconds"`
-	StaleProcessingSeconds     int `yaml:"stale_processing_seconds"`
-	RecoveryTickSeconds        int `yaml:"recovery_tick_seconds"`
-	SigningPipelineDepth       int `yaml:"signing_pipeline_depth"`
+	PollIntervalMs          int `yaml:"poll_interval_ms"`
+	MaxRetryDurationSeconds int `yaml:"max_retry_duration_seconds"`
+	RetryIntervalSeconds    int `yaml:"retry_interval_seconds"`
+	RetryJitterSeconds      int `yaml:"retry_jitter_seconds"`
+	StaleProcessingSeconds  int `yaml:"stale_processing_seconds"`
+	RecoveryTickSeconds     int `yaml:"recovery_tick_seconds"`
+	SigningPipelineDepth    int `yaml:"signing_pipeline_depth"`
 }
 
 type PollerConfig struct {
@@ -121,13 +121,13 @@ func defaultConfig() *Config {
 			ExpirationSeconds: 60,
 		},
 		Submitter: SubmitterConfig{
-			PollIntervalMs:             200,
-			MaxRetryDurationSeconds:    300,
-			RetryIntervalSeconds:       5,
-			RetryJitterSeconds:         2,
-			StaleProcessingSeconds:     120,
-			RecoveryTickSeconds:        30,
-			SigningPipelineDepth:       4,
+			PollIntervalMs:          200,
+			MaxRetryDurationSeconds: 300,
+			RetryIntervalSeconds:    5,
+			RetryJitterSeconds:      2,
+			StaleProcessingSeconds:  120,
+			RecoveryTickSeconds:     30,
+			SigningPipelineDepth:    4,
 		},
 		Poller: PollerConfig{IntervalSeconds: 5},
 		Webhook: WebhookConfig{
