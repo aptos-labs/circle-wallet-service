@@ -139,10 +139,7 @@ func run(logger *slog.Logger) error {
 			_, _ = w.Write([]byte(`{"status":"ok","db":"ok"}`))
 			return
 		}
-		_, err := w.Write([]byte(`{"status":"ok"}`))
-		if err != nil {
-			os.Exit(1)
-		}
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
 	var h http.Handler = mux

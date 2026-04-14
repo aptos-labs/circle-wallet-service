@@ -72,4 +72,5 @@ type Queue interface {
 	ReconcileSequence(ctx context.Context, senderAddress string, chainSeq uint64) error
 	RecoverStaleProcessing(ctx context.Context, olderThan time.Duration) (int64, error)
 	ShiftSenderSequences(ctx context.Context, senderAddress string, failedSeqNum uint64) error
+	ReleaseSequence(ctx context.Context, senderAddress string) error
 }

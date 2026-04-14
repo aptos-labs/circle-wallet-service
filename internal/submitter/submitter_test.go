@@ -280,6 +280,9 @@ type mockQueue struct {
 	shiftSender string
 	shiftSeq    uint64
 	shiftErr    error
+
+	releaseCount  int
+	releaseSender string
 }
 
 func (m *mockQueue) loadClaimCalls() int {
@@ -358,6 +361,14 @@ func (m *mockQueue) UpsertNextSequence(ctx context.Context, senderAddress string
 }
 
 func (m *mockQueue) ReconcileSequence(ctx context.Context, senderAddress string, chainSeq uint64) error {
+	return nil
+}
+
+func (m *mockQueue) ReleaseSequence(ctx context.Context, senderAddress string) error {
+	m.mu.Lock()
+	m.releaseCount++
+	m.releaseSender = senderAddress
+	m.mu.Unlock()
 	return nil
 }
 
