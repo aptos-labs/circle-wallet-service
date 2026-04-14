@@ -142,6 +142,7 @@ func (s *Store) RecoverStaleProcessing(ctx context.Context, olderThan time.Durat
 		WHERE status = ? AND sequence_number IS NOT NULL
 		  AND updated_at < (UTC_TIMESTAMP(3) - INTERVAL ? SECOND)
 		GROUP BY sender_address
+		FOR UPDATE
 	`, string(store.StatusProcessing), sec)
 	if err != nil {
 		return 0, err

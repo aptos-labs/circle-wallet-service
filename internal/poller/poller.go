@@ -68,6 +68,7 @@ func (p *Poller) poll(ctx context.Context) {
 			if time.Now().UTC().After(rec.ExpiresAt) {
 				rec.Status = store.StatusExpired
 				rec.ErrorMessage = "transaction expired without submission hash"
+				rec.UpdatedAt = time.Now().UTC()
 				updated, err := p.store.UpdateIfStatus(ctx, rec, store.StatusSubmitted)
 				if err != nil {
 					p.logger.Error("poller: update expired", "txn_id", rec.ID, "error", err)
@@ -83,6 +84,7 @@ func (p *Poller) poll(ctx context.Context) {
 			if time.Now().UTC().After(rec.ExpiresAt) {
 				rec.Status = store.StatusExpired
 				rec.ErrorMessage = "transaction expired; on-chain lookup failed"
+				rec.UpdatedAt = time.Now().UTC()
 				updated, uerr := p.store.UpdateIfStatus(ctx, rec, store.StatusSubmitted)
 				if uerr != nil {
 					p.logger.Error("poller: update expired", "txn_id", rec.ID, "error", uerr)
@@ -105,6 +107,7 @@ func (p *Poller) poll(ctx context.Context) {
 			rec.Status = store.StatusFailed
 			rec.ErrorMessage = vmStatus(txn)
 		}
+		rec.UpdatedAt = time.Now().UTC()
 		updated, err := p.store.UpdateIfStatus(ctx, rec, store.StatusSubmitted)
 		if err != nil {
 			p.logger.Error("poller: update", "txn_id", rec.ID, "status", rec.Status, "error", err)

@@ -269,6 +269,9 @@ func (c *Config) validate() error {
 	if c.TxnExpirationSeconds() <= 0 {
 		return fmt.Errorf("TXN_EXPIRATION_SECONDS must be greater than 0")
 	}
+	if c.AptosChainID() == 0 {
+		return fmt.Errorf("APTOS_CHAIN_ID must be greater than 0")
+	}
 	return nil
 }
 

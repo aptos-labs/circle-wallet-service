@@ -5,25 +5,36 @@ package aptos
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/aptos-labs/aptos-go-sdk"
 	"github.com/aptos-labs/aptos-go-sdk/api"
 )
 
+const defaultABICacheTTL = 10 * time.Minute
+
+type abiEntry struct {
+	module    *api.MoveModule
+	fetchedAt time.Time
+}
+
 // ABICache fetches and caches Move module ABIs from the Aptos node so that
 // argument types can be resolved at runtime without repeated network calls.
-// The cache is populated lazily per module and held for the server's lifetime.
+// Entries are evicted after a configurable TTL (default 10 minutes) to pick up
+// contract upgrades.
 type ABICache struct {
 	mu      sync.RWMutex
-	modules map[string]*api.MoveModule
+	modules map[string]abiEntry
 	client  aptos.AptosRpcClient
+	ttl     time.Duration
 }
 
 // NewABICache creates a cache backed by the given RPC client.
 func NewABICache(client aptos.AptosRpcClient) *ABICache {
 	return &ABICache{
-		modules: make(map[string]*api.MoveModule),
+		modules: make(map[string]abiEntry),
 		client:  client,
+		ttl:     defaultABICacheTTL,
 	}
 }
 
@@ -33,17 +44,17 @@ func NewABICache(client aptos.AptosRpcClient) *ABICache {
 func (c *ABICache) GetFunctionParams(addr *aptos.AccountAddress, module, function string) ([]string, error) {
 	key := addr.StringLong() + "::" + module
 	c.mu.RLock()
-	mod, ok := c.modules[key]
+	entry, ok := c.modules[key]
 	c.mu.RUnlock()
-	if ok {
-		return lookupFunction(mod, function)
+	if ok && time.Since(entry.fetchedAt) < c.ttl {
+		return lookupFunction(entry.module, function)
 	}
 	mod, err := c.fetchModule(*addr, module)
 	if err != nil {
 		return nil, err
 	}
 	c.mu.Lock()
-	c.modules[key] = mod
+	c.modules[key] = abiEntry{module: mod, fetchedAt: time.Now()}
 	c.mu.Unlock()
 	return lookupFunction(mod, function)
 }

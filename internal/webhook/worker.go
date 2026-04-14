@@ -55,7 +55,7 @@ func ssrfSafeDialer(timeout time.Duration) func(ctx context.Context, network, ad
 }
 
 // Run starts the delivery loop. It blocks until ctx is cancelled. On each tick
-// (1s) it claims up to 50 pending deliveries and attempts delivery. Every 30s
+// (1s) it claims up to 10 pending deliveries and attempts delivery. Every 30s
 // it also recovers orphaned "delivering" records.
 func (w *Worker) Run(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Second)
@@ -92,7 +92,7 @@ func (w *Worker) recoverStale(ctx context.Context) {
 }
 
 func (w *Worker) processBatch(ctx context.Context) {
-	records, err := w.store.ClaimPendingDeliveries(ctx, 50)
+	records, err := w.store.ClaimPendingDeliveries(ctx, 10)
 	if err != nil {
 		w.logger.Error("webhook worker: claim deliveries", "error", err)
 		return

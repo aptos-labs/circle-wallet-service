@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -143,9 +144,21 @@ func run(logger *slog.Logger) error {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	var h http.Handler = mux
+	var inner http.Handler = mux
+	if cfg.RateLimitEnabled() {
+		rl := handler2.NewRateLimitMiddleware(handler2.RateLimiterConfig{
+			Enabled:           true,
+			RequestsPerSecond: cfg.RateLimitRequestsPerSecond(),
+			Burst:             cfg.RateLimitBurst(),
+			PerWallet:         cfg.RateLimitPerWallet(),
+		})
+		inner = rl.Wrap(inner)
+	}
+
+	var h http.Handler = inner
 	if !cfg.TestingMode() {
 		apiKeyBytes := []byte(cfg.APIKey())
+		authedInner := inner
 		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/v1/health" {
 				mux.ServeHTTP(w, r)
@@ -162,18 +175,8 @@ func run(logger *slog.Logger) error {
 				_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 				return
 			}
-			mux.ServeHTTP(w, r)
+			authedInner.ServeHTTP(w, r)
 		})
-	}
-
-	if cfg.RateLimitEnabled() {
-		rl := handler2.NewRateLimitMiddleware(handler2.RateLimiterConfig{
-			Enabled:           true,
-			RequestsPerSecond: cfg.RateLimitRequestsPerSecond(),
-			Burst:             cfg.RateLimitBurst(),
-			PerWallet:         cfg.RateLimitPerWallet(),
-		})
-		h = rl.Wrap(h)
 	}
 
 	srv := &http.Server{
@@ -207,7 +210,7 @@ func run(logger *slog.Logger) error {
 
 func extractBearerToken(header string) string {
 	const prefix = "Bearer "
-	if len(header) >= len(prefix) && header[:len(prefix)] == prefix {
+	if len(header) >= len(prefix) && strings.EqualFold(header[:len(prefix)], prefix) {
 		return header[len(prefix):]
 	}
 	return header

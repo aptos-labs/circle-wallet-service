@@ -2,11 +2,13 @@ package aptos
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	aptossdk "github.com/aptos-labs/aptos-go-sdk"
 	"github.com/aptos-labs/aptos-go-sdk/api"
@@ -95,8 +97,10 @@ func (c *Client) TransactionByHash(hash string) (*api.Transaction, error) {
 	return c.Inner.TransactionByHash(hash)
 }
 
+var viewHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
 // View calls the Aptos /view endpoint with BCS-serialized arguments.
-func (c *Client) View(functionID string, typeArgs []string, args [][]byte) ([]any, error) {
+func (c *Client) View(ctx context.Context, functionID string, typeArgs []string, args [][]byte) ([]any, error) {
 	hexArgs := make([]string, len(args))
 	for i, b := range args {
 		hexArgs[i] = "0x" + fmt.Sprintf("%x", b)
@@ -112,8 +116,13 @@ func (c *Client) View(functionID string, typeArgs []string, args [][]byte) ([]an
 		return nil, fmt.Errorf("marshal view request: %w", err)
 	}
 
-	url := c.nodeURL + "/view"
-	resp, err := http.Post(url, "application/json", bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.nodeURL+"/view", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("build view request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := viewHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("view request: %w", err)
 	}

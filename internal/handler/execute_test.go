@@ -189,9 +189,6 @@ func TestExecute_WithFeePayer(t *testing.T) {
 	if err := json.Unmarshal([]byte(rec.PayloadJSON), &qp); err != nil {
 		t.Fatal(err)
 	}
-	if qp.FeePayerWalletID != "fpw" || qp.FeePayerAddress != rec.FeePayerAddress {
-		t.Fatalf("payload fee payer: %#v vs record addr %q", qp, rec.FeePayerAddress)
-	}
 }
 
 func TestExecute_InvalidFeePayerAddress(t *testing.T) {

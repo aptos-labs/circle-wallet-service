@@ -3,6 +3,7 @@
 package aptos
 
 import (
+	"context"
 	"os"
 	"strconv"
 	"testing"
@@ -177,7 +178,7 @@ func TestBuildFeePayerTransaction(t *testing.T) {
 
 func TestView(t *testing.T) {
 	c := testAptosClient(t)
-	out, err := c.View("0x1::coin::symbol", []string{"0x1::aptos_coin::AptosCoin"}, [][]byte{})
+	out, err := c.View(context.Background(), "0x1::coin::symbol", []string{"0x1::aptos_coin::AptosCoin"}, [][]byte{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +194,7 @@ func TestView(t *testing.T) {
 
 func TestViewInvalidFunction(t *testing.T) {
 	c := testAptosClient(t)
-	_, err := c.View("0x1::coin::this_function_does_not_exist_ever", []string{"0x1::aptos_coin::AptosCoin"}, [][]byte{})
+	_, err := c.View(context.Background(), "0x1::coin::this_function_does_not_exist_ever", []string{"0x1::aptos_coin::AptosCoin"}, [][]byte{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
