@@ -1,16 +1,18 @@
 # Aptos Contract API
 
-Generic REST API for interacting with Aptos Move contracts. Uses [Circle Programmable Wallets](https://developers.circle.com/w3s/programmable-wallets-an-overview) for transaction signing with fee-payer sponsored transactions.
+Production-grade REST API for submitting and tracking Aptos Move transactions. Uses [Circle Programmable Wallets](https://developers.circle.com/w3s/programmable-wallets-an-overview) for custodial signing with optional fee-payer (gas station) sponsored transactions.
+
+Wallet IDs and addresses are provided per-request — no wallet configuration on the server. The server manages Aptos sequence numbers, transaction lifecycle, retries, and webhook notifications. It scales horizontally: multiple instances share a MySQL database with row-level locking to prevent duplicate processing.
 
 ## Endpoints
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/v1/execute` | Yes | Submit an entry function transaction (async, returns 202) |
+| `POST` | `/v1/execute` | Yes | Enqueue an entry function transaction (async, returns 202) |
 | `POST` | `/v1/query` | Yes | Call a view function (sync, returns 200) |
-| `GET` | `/v1/transactions/{id}` | Yes | Poll transaction status |
-| `GET` | `/v1/transactions/{id}/webhooks` | Yes | Webhook delivery history |
-| `GET` | `/v1/health` | No | Health check |
+| `GET` | `/v1/transactions/{id}` | Yes | Poll transaction status and metadata |
+| `GET` | `/v1/transactions/{id}/webhooks` | Yes | List webhook delivery attempts for a transaction |
+| `GET` | `/v1/health` | No | Health check (`?deep=1` verifies MySQL connectivity) |
 
 ## Quick Start
 
@@ -31,7 +33,7 @@ cp .env.example .env
 make create-wallets
 ```
 
-This prints wallet details and a ready-to-paste `CIRCLE_WALLETS=` line for your `.env`.
+This prints wallet details (wallet ID and Aptos address). Note the wallet ID and address — you'll pass them per-request to `/v1/execute`.
 
 ### 3. Fund Wallets
 
@@ -66,7 +68,7 @@ End-to-end tests live in `examples/e2e_test.go` and use the build tag `e2e`. The
 
 **Local**
 
-1. Configure `.env` (same as server): `MYSQL_DSN`, `API_KEY`, Aptos, Circle, and `CIRCLE_WALLETS` (fund wallets on testnet).
+1. Configure `.env` (same as server): `MYSQL_DSN`, `API_KEY`, Aptos, Circle credentials. Fund your wallets on testnet.
 2. Start the server: `make run`
 3. In another terminal: `make test-e2e` (runs `go test -tags=e2e ./examples/ -v -count=1`)
 
@@ -87,7 +89,7 @@ Tests that need two funded wallets skip if only one wallet is configured. Inline
 
 Workflow [.github/workflows/e2e.yml](.github/workflows/e2e.yml) runs on `workflow_dispatch` and on `push` to `main`. It starts MySQL, builds the server, runs it with secrets, then `go test -tags=e2e ./examples/`. If required secrets are missing, the job **skips** E2E steps and succeeds (so forks without secrets stay green).
 
-Configure these **repository secrets** to run live E2E: `API_KEY`, `APTOS_NODE_URL`, `APTOS_CHAIN_ID` (recommended, e.g. `2` for testnet), `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`, `CIRCLE_WALLETS` (JSON array; use **two** wallets to exercise dual-wallet throughput).
+Configure these **repository secrets** to run live E2E: `API_KEY`, `APTOS_NODE_URL`, `APTOS_CHAIN_ID` (recommended, e.g. `2` for testnet), `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`, `CIRCLE_WALLETS` (JSON array of `{"wallet_id","address","public_key"}` objects used by E2E tests; use **two** wallets to exercise dual-wallet throughput).
 
 ## Configuration
 
@@ -153,6 +155,13 @@ Configurable in `config.yaml` (see `config.yaml` for full list):
 | `rate_limit.enabled` | `false` | Enable upstream rate limiting |
 | `rate_limit.requests_per_second` | `100` | Global rate limit |
 | `rate_limit.burst` | `200` | Burst capacity |
+
+## Security
+
+- **Authentication:** All endpoints except `/v1/health` require a Bearer token or `X-API-Key` header. Comparison uses constant-time comparison to prevent timing attacks.
+- **SSRF protection:** Webhook URLs are validated to reject private, loopback, and link-local addresses — both at request time and at delivery time (dial-level blocking).
+- **Request body limit:** All JSON request bodies are limited to 1 MB.
+- **Rate limiting:** Optional token-bucket rate limiter returns 429 with `Retry-After` header when capacity is exceeded.
 
 ## API Reference
 
@@ -293,21 +302,29 @@ queued → processing → submitted → confirmed
 |--------|-------|
 | 400 | Missing transaction ID |
 | 401 | Missing or invalid API key |
-| 404 | Transaction not found (or evicted from in-memory store) |
+| 404 | Transaction not found |
 
 ### GET /v1/health
+
+Returns server liveness. No authentication required.
 
 ```json
 {"status": "ok"}
 ```
 
-No authentication required.
+With `?deep=1`, also verifies MySQL connectivity:
+
+```json
+{"status": "ok", "db": "ok"}
+```
+
+Returns HTTP 500 with `"db": "unreachable"` if the database is down.
 
 ## Webhooks
 
-When a transaction reaches a terminal status (`confirmed`, `failed`, or `expired`), the API sends a POST request to the webhook URL.
+When a transaction reaches a terminal status (`confirmed`, `failed`, or `expired`), a webhook delivery is queued to notify your application.
 
-**Webhook resolution:** per-request `webhook_url` takes precedence over the global `WEBHOOK_URL`.
+**URL resolution:** per-request `webhook_url` takes precedence over the global `WEBHOOK_URL` environment variable. If neither is set, no webhook is sent.
 
 **Payload:**
 
@@ -333,9 +350,17 @@ On failure, `error_message` is included:
 }
 ```
 
-**Delivery:** Persistent outbox — deliveries are stored in MySQL and delivered by a background worker with exponential backoff (up to 5 retries). 4xx client errors are not retried.
+**Delivery:** Persistent outbox pattern — deliveries are stored in MySQL and delivered by a background worker with exponential backoff (up to 5 retries, capped at 5 minutes between attempts). The worker also recovers orphaned deliveries stuck in `delivering` status for over 5 minutes (e.g. after a crash).
 
-**Delivery status:** `GET /v1/transactions/{id}/webhooks` returns the delivery history for a transaction:
+**Retry policy:**
+- **2xx** — success, delivery complete
+- **408, 429** — retryable (transient client errors)
+- **Other 4xx** — permanent failure, not retried
+- **5xx / network error** — retried with exponential backoff
+
+**SSRF protection:** webhook URLs are validated at input time (no private/loopback IPs, no `localhost`) and again at dial time by the delivery worker.
+
+**Delivery history:** `GET /v1/transactions/{id}/webhooks` returns all delivery attempts for a transaction:
 
 ```json
 [
@@ -467,7 +492,8 @@ internal/
     query.go                POST /v1/query — ABI resolve, BCS serialize, call view
     transaction.go          GET /v1/transactions/{id} — status lookup
     webhook.go              GET /v1/transactions/{id}/webhooks — delivery history
-    ratelimit.go            Opt-in global rate limiting middleware
+    webhookurl.go           Webhook URL validation (SSRF prevention)
+    ratelimit.go            Opt-in token-bucket rate limiting middleware
   submitter/
     submitter.go            Dispatcher + per-sender workers with signing pipeline
   store/
@@ -477,9 +503,9 @@ internal/
   poller/
     poller.go               Confirms submitted txns, conditional updates (multi-host safe)
   webhook/
-    notifier.go             Writes delivery records to persistent outbox
-    worker.go               Background delivery worker with exponential backoff
-    store.go                WebhookStore interface + DeliveryRecord
+    store.go                WebhookStore interface + DeliveryRecord type
+    notifier.go             Inserts delivery records into the persistent outbox
+    worker.go               Background worker: claims, delivers, retries with exponential backoff
   db/migrations/            Embedded SQL migrations (auto-applied on startup)
 examples/
   e2e_test.go               End-to-end tests against a running server

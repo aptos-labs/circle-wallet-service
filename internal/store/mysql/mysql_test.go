@@ -182,35 +182,6 @@ func TestFeePayerColumns(t *testing.T) {
 	}
 }
 
-func TestClaimNextQueued(t *testing.T) {
-	s := testDB(t)
-	ctx := context.Background()
-	sender := "0xsame"
-	now := time.Now().UTC().Truncate(time.Millisecond)
-	for i := range 3 {
-		rec := testTxn(sender, store.StatusQueued)
-		rec.ID = uuid.New().String()
-		rec.CreatedAt = now.Add(time.Duration(i) * time.Millisecond)
-		rec.UpdatedAt = rec.CreatedAt
-		if err := s.Create(ctx, rec); err != nil {
-			t.Fatal(err)
-		}
-	}
-	claimed, err := s.ClaimNextQueued(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if claimed == nil {
-		t.Fatal("expected claim")
-	}
-	if claimed.Status != store.StatusProcessing {
-		t.Fatalf("status %s", claimed.Status)
-	}
-	if claimed.SequenceNumber == nil || *claimed.SequenceNumber != 0 {
-		t.Fatalf("seq %+v", claimed.SequenceNumber)
-	}
-}
-
 func TestClaimNextQueuedForSender(t *testing.T) {
 	s := testDB(t)
 	ctx := context.Background()
@@ -275,7 +246,7 @@ func TestAtomicSequenceAllocation(t *testing.T) {
 	}
 	var seqs []uint64
 	for range 3 {
-		c, err := s.ClaimNextQueued(ctx)
+		c, err := s.ClaimNextQueuedForSender(ctx, sender)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -319,7 +290,7 @@ func TestReconcileSequence(t *testing.T) {
 	s := testDB(t)
 	ctx := context.Background()
 	sender := "0xrecon"
-	if err := s.UpsertNextSequence(ctx, sender, 5); err != nil {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO account_sequences (sender_address, next_sequence) VALUES (?, ?)`, sender, 5); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.ReconcileSequence(ctx, sender, 10); err != nil {
@@ -364,7 +335,7 @@ func TestShiftSenderSequences(t *testing.T) {
 		}
 	}
 	for range 3 {
-		if _, err := s.ClaimNextQueued(ctx); err != nil {
+		if _, err := s.ClaimNextQueuedForSender(ctx, sender); err != nil {
 			t.Fatal(err)
 		}
 	}

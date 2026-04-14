@@ -10,79 +10,6 @@ import (
 	"github.com/aptos-labs/jc-contract-integration/internal/store"
 )
 
-// ClaimNextQueued implements store.Queue.
-func (s *Store) ClaimNextQueued(ctx context.Context) (*store.TransactionRecord, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-
-	var id, sender string
-	err = tx.QueryRowContext(ctx, `
-		SELECT id, sender_address FROM transactions
-		WHERE status = ?
-		ORDER BY created_at ASC, id ASC
-		LIMIT 1
-		FOR UPDATE
-	`, string(store.StatusQueued)).Scan(&id, &sender)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	var dbNext sql.NullInt64
-	err = tx.QueryRowContext(ctx, `
-		SELECT next_sequence FROM account_sequences WHERE sender_address = ? FOR UPDATE
-	`, sender).Scan(&dbNext)
-	if errors.Is(err, sql.ErrNoRows) {
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO account_sequences (sender_address, next_sequence) VALUES (?, 0)
-		`, sender)
-		if err != nil {
-			return nil, err
-		}
-		dbNext = sql.NullInt64{Int64: 0, Valid: true}
-	} else if err != nil {
-		return nil, err
-	}
-
-	allocated := uint64(dbNext.Int64)
-
-	_, err = tx.ExecContext(ctx, `
-		UPDATE account_sequences SET next_sequence = next_sequence + 1, updated_at = UTC_TIMESTAMP(3)
-		WHERE sender_address = ?
-	`, sender)
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = tx.ExecContext(ctx, `
-		UPDATE transactions SET status = ?, sequence_number = ?, updated_at = UTC_TIMESTAMP(3) WHERE id = ?
-	`, string(store.StatusProcessing), allocated, id)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	committed = true
-
-	rec, err := s.Get(ctx, id)
-	if err != nil || rec == nil {
-		return nil, fmt.Errorf("load claimed record %s: %w", id, err)
-	}
-	return rec, nil
-}
-
 // ListQueuedSenders implements store.Queue.
 func (s *Store) ListQueuedSenders(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
@@ -174,20 +101,13 @@ func (s *Store) ClaimNextQueuedForSender(ctx context.Context, senderAddress stri
 	committed = true
 
 	rec, err := s.Get(ctx, id)
-	if err != nil || rec == nil {
+	if err != nil {
 		return nil, fmt.Errorf("load claimed record %s: %w", id, err)
 	}
+	if rec == nil {
+		return nil, fmt.Errorf("claimed record %s not found after commit", id)
+	}
 	return rec, nil
-}
-
-// UpsertNextSequence implements store.Queue.
-func (s *Store) UpsertNextSequence(ctx context.Context, senderAddress string, next uint64) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO account_sequences (sender_address, next_sequence)
-		VALUES (?, ?)
-		ON DUPLICATE KEY UPDATE next_sequence = VALUES(next_sequence), updated_at = UTC_TIMESTAMP(3)
-	`, senderAddress, next)
-	return err
 }
 
 // ReconcileSequence implements store.Queue.

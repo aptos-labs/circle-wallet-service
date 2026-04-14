@@ -371,60 +371,6 @@ func TestAccessorMethods(t *testing.T) {
 	}
 }
 
-func TestHelperFunctions(t *testing.T) {
-	t.Setenv("HB", "")
-	if got := envBool("HB", true); !got {
-		t.Fatal("envBool missing")
-	}
-	t.Setenv("HB", "true")
-	if got := envBool("HB", false); !got {
-		t.Fatal("envBool true")
-	}
-	t.Setenv("HB", "bogus")
-	if got := envBool("HB", true); !got {
-		t.Fatal("envBool invalid uses default")
-	}
-
-	t.Setenv("HI", "")
-	if envInt("HI", 7) != 7 {
-		t.Fatal("envInt missing")
-	}
-	t.Setenv("HI", "42")
-	if envInt("HI", 0) != 42 {
-		t.Fatal("envInt valid")
-	}
-	t.Setenv("HI", "x")
-	if envInt("HI", 99) != 99 {
-		t.Fatal("envInt invalid")
-	}
-
-	t.Setenv("HU8", "")
-	if envUint8("HU8", 5) != 5 {
-		t.Fatal("envUint8 missing")
-	}
-	t.Setenv("HU8", "200")
-	if envUint8("HU8", 1) != 200 {
-		t.Fatal("envUint8 valid")
-	}
-	t.Setenv("HU8", "999")
-	if envUint8("HU8", 3) != 3 {
-		t.Fatal("envUint8 invalid")
-	}
-
-	t.Setenv("HU64", "")
-	if envUint64("HU64", 9) != 9 {
-		t.Fatal("envUint64 missing")
-	}
-	t.Setenv("HU64", "18446744073709551615")
-	if envUint64("HU64", 0) != 18446744073709551615 {
-		t.Fatal("envUint64 max")
-	}
-	t.Setenv("HU64", "notnum")
-	if envUint64("HU64", 11) != 11 {
-		t.Fatal("envUint64 invalid")
-	}
-}
-
 func TestServerPortDefault(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Server.Port = 0

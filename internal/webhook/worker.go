@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+// Worker is the background goroutine that delivers webhooks from the outbox.
+// It uses an HTTP client with SSRF-safe dialing (rejects private/loopback IPs).
 type Worker struct {
 	store      WebhookStore
 	httpClient *http.Client
@@ -52,6 +54,9 @@ func ssrfSafeDialer(timeout time.Duration) func(ctx context.Context, network, ad
 	}
 }
 
+// Run starts the delivery loop. It blocks until ctx is cancelled. On each tick
+// (1s) it claims up to 50 pending deliveries and attempts delivery. Every 30s
+// it also recovers orphaned "delivering" records.
 func (w *Worker) Run(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()

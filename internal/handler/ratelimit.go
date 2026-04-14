@@ -9,6 +9,7 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// RateLimiterConfig controls the optional upstream rate limiter.
 type RateLimiterConfig struct {
 	Enabled           bool
 	RequestsPerSecond int
@@ -16,6 +17,8 @@ type RateLimiterConfig struct {
 	PerWallet         bool // TODO: per-wallet limiting (not implemented; global only).
 }
 
+// RateLimitMiddleware wraps an http.Handler with a global token-bucket rate
+// limiter. When the bucket is empty it returns 429 with a Retry-After header.
 type RateLimitMiddleware struct {
 	global  *rate.Limiter
 	enabled bool

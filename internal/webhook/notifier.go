@@ -1,3 +1,13 @@
+// Package webhook implements the persistent outbox pattern for webhook delivery.
+//
+// When a transaction reaches a terminal status, [Notifier.Notify] inserts a
+// [DeliveryRecord] into MySQL. The background [Worker] claims pending records,
+// POSTs the JSON payload to the target URL, and retries with exponential backoff
+// on transient failures (5xx, network errors, 408, 429). Permanent client errors
+// (other 4xx) are not retried.
+//
+// The Worker also recovers deliveries orphaned in "delivering" state for more
+// than 5 minutes (e.g. after a crash) by resetting them to "pending".
 package webhook
 
 import (
@@ -10,6 +20,7 @@ import (
 	"github.com/google/uuid"
 )
 
+// Payload is the JSON body POSTed to webhook URLs on terminal transaction status.
 type Payload struct {
 	TransactionID string          `json:"transaction_id"`
 	Status        store.TxnStatus `json:"status"`
@@ -20,6 +31,9 @@ type Payload struct {
 	Timestamp     time.Time       `json:"timestamp"`
 }
 
+// Notifier writes delivery records to the persistent outbox. It resolves the
+// webhook URL (per-request URL takes precedence over globalURL) and inserts a
+// pending [DeliveryRecord] for the [Worker] to pick up.
 type Notifier struct {
 	globalURL string
 	store     WebhookStore

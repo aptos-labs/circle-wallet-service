@@ -10,6 +10,9 @@ import (
 	"github.com/aptos-labs/aptos-go-sdk/crypto"
 )
 
+// Signer wraps a [Client] and entity secret to provide a single-call signing
+// method that handles BCS serialization, entity secret encryption, the Circle
+// API call, and AccountAuthenticator assembly.
 type Signer struct {
 	client       *Client
 	entitySecret string

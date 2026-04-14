@@ -9,6 +9,9 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// PublicKeyCache lazily resolves and caches Ed25519 public keys for Circle
+// wallets. Concurrent requests for the same wallet ID are coalesced via
+// singleflight so that at most one Circle API call is made per wallet.
 type PublicKeyCache struct {
 	client *Client
 	mu     sync.RWMutex
@@ -34,6 +37,8 @@ func ensure0xPrefix(hex string) string {
 	return "0x" + hex
 }
 
+// Resolve returns the 0x-prefixed Ed25519 public key for walletID, fetching
+// from Circle on first access and caching for the lifetime of the process.
 func (c *PublicKeyCache) Resolve(ctx context.Context, walletID string) (string, error) {
 	c.mu.RLock()
 	if pk, ok := c.keys[walletID]; ok {
@@ -69,6 +74,7 @@ func (c *PublicKeyCache) Resolve(ctx context.Context, walletID string) (string, 
 	return v.(string), nil
 }
 
+// Set manually seeds the cache (useful in tests or when the key is already known).
 func (c *PublicKeyCache) Set(walletID, publicKeyHex string) {
 	pk := ensure0xPrefix(publicKeyHex)
 	if pk == "" {
