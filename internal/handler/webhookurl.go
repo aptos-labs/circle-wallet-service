@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// ValidateWebhookURL checks that raw is a well-formed http(s) URL pointing to
+// a public host. Returns an error if the scheme is missing, the hostname is
+// empty, or the resolved IP is private/loopback/link-local (SSRF prevention).
 func ValidateWebhookURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {

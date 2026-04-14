@@ -352,14 +352,6 @@ func (m *mockQueue) ListByStatus(ctx context.Context, status store.TxnStatus) ([
 }
 func (m *mockQueue) Close() error { return nil }
 
-func (m *mockQueue) ClaimNextQueued(ctx context.Context) (*store.TransactionRecord, error) {
-	return nil, nil
-}
-
-func (m *mockQueue) UpsertNextSequence(ctx context.Context, senderAddress string, next uint64) error {
-	return nil
-}
-
 func (m *mockQueue) ReconcileSequence(ctx context.Context, senderAddress string, chainSeq uint64) error {
 	return nil
 }

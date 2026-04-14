@@ -1,3 +1,5 @@
+// Package aptos wraps the Aptos Go SDK with helpers for ABI-driven transaction
+// building, BCS argument serialization, fee-payer signing, and view calls.
 package aptos
 
 import (
@@ -8,14 +10,16 @@ import (
 	"github.com/aptos-labs/aptos-go-sdk/api"
 )
 
-// ABICache cahces the ABI so it can be looked up quickly without a lot of API calls
+// ABICache fetches and caches Move module ABIs from the Aptos node so that
+// argument types can be resolved at runtime without repeated network calls.
+// The cache is populated lazily per module and held for the server's lifetime.
 type ABICache struct {
 	mu      sync.RWMutex
 	modules map[string]*api.MoveModule
 	client  aptos.AptosRpcClient
 }
 
-// NewABICache initializes the ABICache
+// NewABICache creates a cache backed by the given RPC client.
 func NewABICache(client aptos.AptosRpcClient) *ABICache {
 	return &ABICache{
 		modules: make(map[string]*api.MoveModule),
@@ -23,7 +27,9 @@ func NewABICache(client aptos.AptosRpcClient) *ABICache {
 	}
 }
 
-// GetFunctionParams gets all the function parameters from the ABI, going through the cache
+// GetFunctionParams returns the Move type strings for a function's parameters,
+// fetching the module ABI from the node on first access. Signer parameters are
+// included in the raw ABI and must be stripped by the caller.
 func (c *ABICache) GetFunctionParams(addr *aptos.AccountAddress, module, function string) ([]string, error) {
 	key := addr.StringLong() + "::" + module
 	c.mu.RLock()
@@ -42,7 +48,6 @@ func (c *ABICache) GetFunctionParams(addr *aptos.AccountAddress, module, functio
 	return lookupFunction(mod, function)
 }
 
-// lookupFunction searches for the function in the module
 func lookupFunction(m *api.MoveModule, name string) ([]string, error) {
 	for _, fun := range m.ExposedFunctions {
 		if fun.Name == name {
@@ -61,6 +66,8 @@ func (c *ABICache) fetchModule(address aptos.AccountAddress, module string) (*ap
 	return moduleData.Abi, nil
 }
 
+// BuildEntryFunctionPayload parses functionId ("addr::mod::fn"), fetches the
+// module ABI, and constructs an [aptos.EntryFunction] with BCS-serialized arguments.
 func (c *ABICache) BuildEntryFunctionPayload(functionId string, typeArgs []string, args []any) (*aptos.EntryFunction, error) {
 	moduleAddr, moduleName, functionName, err := ParseFunctionID(functionId)
 	if err != nil {

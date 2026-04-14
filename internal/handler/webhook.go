@@ -6,6 +6,8 @@ import (
 	"github.com/aptos-labs/jc-contract-integration/internal/webhook"
 )
 
+// ListWebhookDeliveries handles GET /v1/transactions/{id}/webhooks.
+// Returns all delivery attempts for a transaction, ordered by creation time.
 func ListWebhookDeliveries(ws webhook.WebhookStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		txnID := r.PathValue("id")

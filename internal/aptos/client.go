@@ -12,6 +12,8 @@ import (
 	"github.com/aptos-labs/aptos-go-sdk/api"
 )
 
+// Client wraps the Aptos Go SDK with default gas and expiration settings.
+// It exposes Inner for direct SDK access when needed (e.g. account info lookup).
 type Client struct {
 	Inner         *aptossdk.Client
 	nodeURL       string

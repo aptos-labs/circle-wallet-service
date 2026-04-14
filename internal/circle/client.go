@@ -1,3 +1,14 @@
+// Package circle provides a client for the Circle Programmable Wallets API,
+// specifically the operations needed for Aptos fee-payer transaction signing.
+//
+// Three main components:
+//   - [Client] — low-level HTTP client: wallet lookup, RSA key fetch, entity
+//     secret encryption, and the sign/transaction endpoint.
+//   - [Signer] — higher-level helper that BCS-serializes a RawTransactionWithData,
+//     encrypts the entity secret, calls sign/transaction, and assembles the
+//     resulting Ed25519 AccountAuthenticator.
+//   - [PublicKeyCache] — thread-safe, lazy-loading cache that resolves wallet
+//     public keys from Circle (using singleflight to coalesce concurrent lookups).
 package circle
 
 import (
@@ -19,6 +30,8 @@ import (
 	"time"
 )
 
+// Client is a low-level HTTP client for the Circle Programmable Wallets v1 API.
+// It caches the entity RSA public key after the first fetch.
 type Client struct {
 	apiKey     string
 	baseURL    string
@@ -35,6 +48,7 @@ func NewClient(apiKey string) *Client {
 	}
 }
 
+// WalletResponse is the Circle API response for GET /wallets/{id}.
 type WalletResponse struct {
 	Data struct {
 		Wallet struct {
@@ -45,6 +59,7 @@ type WalletResponse struct {
 	} `json:"data"`
 }
 
+// GetWallet retrieves wallet details including the initial Ed25519 public key.
 func (c *Client) GetWallet(ctx context.Context, walletID string) (*WalletResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/wallets/"+walletID, nil)
 	if err != nil {
@@ -121,6 +136,8 @@ func (c *Client) getRSAKey(ctx context.Context) (*rsa.PublicKey, error) {
 	return rsaKey, nil
 }
 
+// EncryptEntitySecret RSA-OAEP encrypts the entity secret (hex-encoded) with
+// Circle's public key. A fresh ciphertext is needed per signing request.
 func (c *Client) EncryptEntitySecret(ctx context.Context, entitySecretHex string) (string, error) {
 	secretBytes, err := hex.DecodeString(strings.TrimPrefix(entitySecretHex, "0x"))
 	if err != nil {
@@ -137,6 +154,7 @@ func (c *Client) EncryptEntitySecret(ctx context.Context, entitySecretHex string
 	return base64.StdEncoding.EncodeToString(encrypted), nil
 }
 
+// SignTransactionForDeveloperRequest is the request body for POST /developer/sign/transaction.
 type SignTransactionForDeveloperRequest struct {
 	WalletID               string `json:"walletId"`
 	RawTransaction         string `json:"rawTransaction"`
@@ -144,6 +162,7 @@ type SignTransactionForDeveloperRequest struct {
 	Memo                   string `json:"memo"`
 }
 
+// SignMessageResponse wraps the Ed25519 signature returned by Circle.
 type SignMessageResponse struct {
 	Data struct {
 		Signature string `json:"signature"`

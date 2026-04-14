@@ -1,3 +1,11 @@
+// Package config loads application configuration from a YAML file (default
+// config.yaml) with environment variable overrides. A .env file is also
+// loaded via godotenv for local development convenience.
+//
+// Precedence: environment variable > YAML file > built-in default.
+//
+// Call [Load] at startup to get a validated [Config]. Accessor methods on
+// Config are used throughout the codebase to read settings.
 package config
 
 import (
@@ -12,12 +20,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// CircleWallet represents a resolved Circle wallet with its Aptos address and
+// Ed25519 public key. Used by the submitter to verify address/key consistency.
 type CircleWallet struct {
 	WalletID  string `json:"wallet_id"`
 	Address   string `json:"address"`
 	PublicKey string `json:"public_key"`
 }
 
+// VerifyWallet confirms that the wallet's public key derives to the claimed
+// Aptos address (authkey == address). Returns an error on mismatch.
 func (wallet *CircleWallet) VerifyWallet() error {
 	address := &aptos.AccountAddress{}
 	err := address.ParseStringRelaxed(wallet.Address)
@@ -92,6 +104,7 @@ type RateLimitConfig struct {
 	PerWallet         bool `yaml:"per_wallet"`
 }
 
+// Config holds all application settings. Created by [Load].
 type Config struct {
 	Server      ServerConfig      `yaml:"server"`
 	MySQL       MySQLConfig       `yaml:"mysql"`
@@ -144,6 +157,8 @@ func defaultConfig() *Config {
 	}
 }
 
+// Load reads config.yaml (or CONFIG_PATH), applies environment variable
+// overrides, validates required fields, and returns the final [Config].
 func Load() (*Config, error) {
 	_ = godotenv.Load()
 
@@ -367,50 +382,3 @@ func env(key, defaultVal string) string {
 	return defaultVal
 }
 
-func envBool(key string, defaultVal bool) bool {
-	v := os.Getenv(key)
-	if v == "" {
-		return defaultVal
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		return defaultVal
-	}
-	return b
-}
-
-func envInt(key string, defaultVal int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return defaultVal
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return defaultVal
-	}
-	return n
-}
-
-func envUint8(key string, defaultVal uint8) uint8 {
-	v := os.Getenv(key)
-	if v == "" {
-		return defaultVal
-	}
-	n, err := strconv.ParseUint(v, 10, 8)
-	if err != nil {
-		return defaultVal
-	}
-	return uint8(n)
-}
-
-func envUint64(key string, defaultVal uint64) uint64 {
-	v := os.Getenv(key)
-	if v == "" {
-		return defaultVal
-	}
-	n, err := strconv.ParseUint(v, 10, 64)
-	if err != nil {
-		return defaultVal
-	}
-	return n
-}

@@ -1,3 +1,13 @@
+// Package store defines the transaction persistence interfaces and data types
+// shared across the API handlers, submitter, poller, and webhook subsystems.
+//
+// Two interfaces are defined:
+//   - [Store] for basic CRUD and status queries (used by handlers and poller).
+//   - [Queue] which extends Store with atomic claim, sequence management, and
+//     recovery operations (used by the submitter worker).
+//
+// The MySQL implementation lives in [store/mysql]. An in-memory implementation
+// exists for unit tests.
 package store
 
 import (
@@ -6,6 +16,11 @@ import (
 	"time"
 )
 
+// TxnStatus represents the lifecycle state of a transaction.
+//
+//	queued → processing → submitted → confirmed
+//	                                → failed
+//	                                → expired
 type TxnStatus string
 
 const (
@@ -52,9 +67,13 @@ type QueuedPayload struct {
 	FeePayerAddress  string   `json:"fee_payer_address,omitempty"`
 }
 
+// Store provides CRUD and query operations for transaction records.
+// Used by API handlers (create, get, list) and the poller (update status).
 type Store interface {
 	Create(ctx context.Context, rec *TransactionRecord) error
 	Update(ctx context.Context, rec *TransactionRecord) error
+	// UpdateIfStatus atomically updates the record only when its current status matches
+	// expectedStatus. Returns false if another host already changed the status (no-op).
 	UpdateIfStatus(ctx context.Context, rec *TransactionRecord, expectedStatus TxnStatus) (bool, error)
 	Get(ctx context.Context, id string) (*TransactionRecord, error)
 	GetByIdempotencyKey(ctx context.Context, key string) (*TransactionRecord, error)
@@ -62,15 +81,27 @@ type Store interface {
 	Close() error
 }
 
-// Queue extends Store with claim and sequence helpers for the submitter worker (MySQL).
+// Queue extends Store with the atomic claim/sequence operations needed by the
+// submitter worker. Each method below is designed for multi-host safety using
+// row-level locking (SELECT ... FOR UPDATE) in the MySQL implementation.
 type Queue interface {
 	Store
-	ClaimNextQueued(ctx context.Context) (*TransactionRecord, error)
+	// ClaimNextQueuedForSender atomically picks the oldest queued transaction for
+	// the given sender, allocates the next Aptos sequence number, and transitions
+	// it to "processing" — all inside a single SQL transaction.
 	ClaimNextQueuedForSender(ctx context.Context, senderAddress string) (*TransactionRecord, error)
+	// ListQueuedSenders returns distinct sender addresses that have queued work.
 	ListQueuedSenders(ctx context.Context) ([]string, error)
-	UpsertNextSequence(ctx context.Context, senderAddress string, next uint64) error
+	// ReconcileSequence advances the local sequence counter to at least chainSeq
+	// (GREATEST). Used after an on-chain lookup to correct drift.
 	ReconcileSequence(ctx context.Context, senderAddress string, chainSeq uint64) error
+	// RecoverStaleProcessing resets transactions stuck in "processing" longer than
+	// olderThan back to "queued" and decrements the sequence counter accordingly.
 	RecoverStaleProcessing(ctx context.Context, olderThan time.Duration) (int64, error)
+	// ShiftSenderSequences re-queues all transactions for a sender with sequence
+	// numbers above failedSeqNum and adjusts the counter (atomic SQL transaction).
 	ShiftSenderSequences(ctx context.Context, senderAddress string, failedSeqNum uint64) error
+	// ReleaseSequence decrements the sender's sequence counter by 1, used when a
+	// claimed transaction is returned to "queued" before submission.
 	ReleaseSequence(ctx context.Context, senderAddress string) error
 }

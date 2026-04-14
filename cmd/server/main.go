@@ -207,7 +207,7 @@ func run(logger *slog.Logger) error {
 
 func extractBearerToken(header string) string {
 	const prefix = "Bearer "
-	if len(header) > len(prefix) && header[:len(prefix)] == prefix {
+	if len(header) >= len(prefix) && header[:len(prefix)] == prefix {
 		return header[len(prefix):]
 	}
 	return header

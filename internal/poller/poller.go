@@ -1,3 +1,10 @@
+// Package poller confirms submitted transactions by polling the Aptos node.
+//
+// The [Poller] periodically lists all "submitted" transactions from the store,
+// looks up each by txn_hash on-chain, and transitions them to "confirmed",
+// "failed", or "expired" based on the result. Updates use [store.Store.UpdateIfStatus]
+// (conditional on status = "submitted") so multiple server instances can poll
+// concurrently without double-processing.
 package poller
 
 import (
@@ -17,6 +24,7 @@ type notifyHook interface {
 	Notify(ctx context.Context, rec *store.TransactionRecord)
 }
 
+// Poller polls the Aptos node for submitted transaction outcomes.
 type Poller struct {
 	client   aptosTxnClient
 	store    store.Store
@@ -35,6 +43,7 @@ func New(client aptosTxnClient, st store.Store, notifier notifyHook, interval ti
 	}
 }
 
+// Run starts the polling loop. It blocks until ctx is cancelled.
 func (p *Poller) Run(ctx context.Context) {
 	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()

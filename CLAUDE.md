@@ -29,13 +29,15 @@ make check                                 # fmt + vet + lint + unit tests
 ## Key Architecture
 
 - **ABI Cache** (`internal/aptos/abi.go`): Fetches and caches module ABIs from the Aptos node
-- **Execute Handler** (`internal/handler/execute.go`): Validates requests and inserts `queued` rows in MySQL
-- **Submitter** (`internal/submitter/`): Background worker — sequence reconcile, build, Circle sign, submit
-- **MySQL Store** (`internal/store/mysql/`): Transactions + `account_sequences`; claim/queue helpers
-- **Migrations** (`internal/db/migrations/`): Embedded SQL; applied on server startup
+- **Execute Handler** (`internal/handler/execute.go`): Validates requests, SSRF-checks webhook URLs, inserts `queued` rows in MySQL
+- **Submitter** (`internal/submitter/`): Background dispatcher + per-sender workers with signing pipeline
+- **MySQL Store** (`internal/store/mysql/`): Transactions + `account_sequences`; atomic claim/queue with row-level locking
+- **Migrations** (`internal/db/migrations/`): Embedded SQL; auto-applied on startup
 - **Query Handler** (`internal/handler/query.go`): Proxies view calls to the Aptos node `/view` endpoint
-- **Poller** (`internal/poller/`): Confirms submitted transactions by hash
-- **Circle Signer** (`internal/circle/`): `sign/transaction` for Aptos fee-payer payloads
+- **Poller** (`internal/poller/`): Confirms submitted transactions by hash; conditional updates prevent double-processing
+- **Circle Signer** (`internal/circle/`): BCS serialize → encrypt entity secret → `sign/transaction` → AccountAuthenticator
+- **Public Key Cache** (`internal/circle/pubkey_cache.go`): Lazy, thread-safe wallet public key resolution with singleflight
+- **Webhook Outbox** (`internal/webhook/`): Persistent outbox pattern — notifier inserts records, worker delivers with backoff
 
 ## Environment
 
