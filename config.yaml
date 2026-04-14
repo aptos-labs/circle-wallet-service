@@ -1,0 +1,41 @@
+server:
+  port: 8080
+  testing_mode: false
+
+mysql:
+  dsn: ""
+
+aptos:
+  node_url: "https://api.testnet.aptoslabs.com/v1"
+  chain_id: 2
+
+circle:
+  api_key: ""
+  entity_secret: ""
+
+transaction:
+  max_gas_amount: 2000000
+  expiration_seconds: 60
+
+submitter:
+  poll_interval_ms: 200
+  max_retry_duration_seconds: 300
+  retry_interval_seconds: 5
+  retry_jitter_seconds: 2
+  stale_processing_seconds: 120
+  recovery_tick_seconds: 30
+  signing_pipeline_depth: 4
+
+poller:
+  interval_seconds: 5
+
+webhook:
+  global_url: ""
+  max_retries: 5
+  timeout_seconds: 10
+
+rate_limit:
+  enabled: false
+  requests_per_second: 100
+  burst: 200
+  per_wallet: false

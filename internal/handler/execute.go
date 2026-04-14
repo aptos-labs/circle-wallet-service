@@ -13,42 +13,21 @@ import (
 	"github.com/google/uuid"
 )
 
-// walletInfo allows callers to supply wallet credentials inline rather
-// than relying on pre-configured wallets in CIRCLE_WALLETS.
-type walletInfo struct {
-	WalletID  string `json:"wallet_id"`
-	Address   string `json:"address"`
-	PublicKey string `json:"public_key"`
-}
-
 type executeRequest struct {
-	WalletID       string      `json:"wallet_id"`
-	Wallet         *walletInfo `json:"wallet,omitempty"`
-	FunctionID     string      `json:"function_id"`
-	TypeArguments  []string    `json:"type_arguments"`
-	Arguments      []any       `json:"arguments"`
-	MaxGasAmount   *uint64     `json:"max_gas_amount,omitempty"`
-	WebhookURL     string      `json:"webhook_url,omitempty"`
-	IdempotencyKey string      `json:"idempotency_key,omitempty"`
+	WalletID       string        `json:"wallet_id"`
+	Address        string        `json:"address"`
+	FunctionID     string        `json:"function_id"`
+	TypeArguments  []string      `json:"type_arguments"`
+	Arguments      []any         `json:"arguments"`
+	MaxGasAmount   *uint64       `json:"max_gas_amount,omitempty"`
+	WebhookURL     string        `json:"webhook_url,omitempty"`
+	IdempotencyKey string        `json:"idempotency_key,omitempty"`
+	FeePayer       *feePayerInfo `json:"fee_payer,omitempty"`
 }
 
-// resolveWallet returns the Circle wallet to use for this request.
-func resolveWallet(cfg *config.Config, req *executeRequest) (config.CircleWallet, bool) {
-	if req.Wallet != nil {
-		w := config.CircleWallet{
-			WalletID:  req.Wallet.WalletID,
-			Address:   req.Wallet.Address,
-			PublicKey: req.Wallet.PublicKey,
-		}
-		if w.WalletID == "" || w.Address == "" || w.PublicKey == "" {
-			return config.CircleWallet{}, false
-		}
-		return w, true
-	}
-	if req.WalletID != "" {
-		return cfg.LookupWallet(req.WalletID)
-	}
-	return config.CircleWallet{}, false
+type feePayerInfo struct {
+	WalletID string `json:"wallet_id"`
+	Address  string `json:"address"`
 }
 
 // Execute handles POST /v1/execute — enqueues a transaction for the background submitter.
@@ -78,8 +57,12 @@ func Execute(cfg *config.Config, st store.Store, logger *slog.Logger) http.Handl
 			}
 		}
 
-		if req.WalletID == "" && req.Wallet == nil {
-			errorResponse(w, http.StatusBadRequest, "wallet_id or wallet object is required")
+		if req.WalletID == "" {
+			errorResponse(w, http.StatusBadRequest, "wallet_id is required")
+			return
+		}
+		if req.Address == "" {
+			errorResponse(w, http.StatusBadRequest, "address is required")
 			return
 		}
 		if req.FunctionID == "" {
@@ -87,35 +70,37 @@ func Execute(cfg *config.Config, st store.Store, logger *slog.Logger) http.Handl
 			return
 		}
 
-		wallet, ok := resolveWallet(cfg, &req)
-		if !ok {
-			errorResponse(w, http.StatusBadRequest, "unknown wallet_id/address or incomplete inline wallet (wallet_id, address, public_key required)")
-			return
-		}
-		if req.Wallet != nil {
-			if err := wallet.VerifyWallet(); err != nil {
-				errorResponse(w, http.StatusBadRequest, "invalid wallet: "+err.Error())
-				return
-			}
-		}
-
-		senderAddr, err := aptos.ParseAddress(wallet.Address)
+		senderAddr, err := aptos.ParseAddress(req.Address)
 		if err != nil {
-			errorResponse(w, http.StatusBadRequest, "invalid wallet address: "+err.Error())
+			errorResponse(w, http.StatusBadRequest, "invalid address: "+err.Error())
 			return
 		}
 		canonicalSender := senderAddr.StringLong()
 
-		qp := store.QueuedPayload{
-			TypeArguments: req.TypeArguments,
-			Arguments:     req.Arguments,
-		}
-		if req.Wallet != nil {
-			qp.Wallet = &store.WalletField{
-				WalletID:  req.Wallet.WalletID,
-				Address:   req.Wallet.Address,
-				PublicKey: req.Wallet.PublicKey,
+		var feePayerWalletID, feePayerAddress string
+		if req.FeePayer != nil {
+			if req.FeePayer.WalletID == "" {
+				errorResponse(w, http.StatusBadRequest, "fee_payer.wallet_id is required")
+				return
 			}
+			if req.FeePayer.Address == "" {
+				errorResponse(w, http.StatusBadRequest, "fee_payer.address is required")
+				return
+			}
+			fpAddr, err := aptos.ParseAddress(req.FeePayer.Address)
+			if err != nil {
+				errorResponse(w, http.StatusBadRequest, "invalid fee_payer.address: "+err.Error())
+				return
+			}
+			feePayerWalletID = req.FeePayer.WalletID
+			feePayerAddress = fpAddr.StringLong()
+		}
+
+		qp := store.QueuedPayload{
+			TypeArguments:    req.TypeArguments,
+			Arguments:        req.Arguments,
+			FeePayerWalletID: feePayerWalletID,
+			FeePayerAddress:  feePayerAddress,
 		}
 		payloadJSON, err := json.Marshal(qp)
 		if err != nil {
@@ -125,18 +110,20 @@ func Execute(cfg *config.Config, st store.Store, logger *slog.Logger) http.Handl
 
 		now := time.Now().UTC()
 		rec := &store.TransactionRecord{
-			ID:             uuid.New().String(),
-			IdempotencyKey: idempKey,
-			Status:         store.StatusQueued,
-			SenderAddress:  canonicalSender,
-			FunctionID:     req.FunctionID,
-			WalletID:       wallet.WalletID,
-			PayloadJSON:    string(payloadJSON),
-			MaxGasAmount:   req.MaxGasAmount,
-			WebhookURL:     req.WebhookURL,
-			CreatedAt:      now,
-			UpdatedAt:      now,
-			ExpiresAt:      now.Add(time.Duration(cfg.TxnExpirationSeconds) * time.Second),
+			ID:               uuid.New().String(),
+			IdempotencyKey:   idempKey,
+			Status:           store.StatusQueued,
+			SenderAddress:    canonicalSender,
+			FunctionID:       req.FunctionID,
+			WalletID:         req.WalletID,
+			FeePayerWalletID: feePayerWalletID,
+			FeePayerAddress:  feePayerAddress,
+			PayloadJSON:      string(payloadJSON),
+			MaxGasAmount:     req.MaxGasAmount,
+			WebhookURL:       req.WebhookURL,
+			CreatedAt:        now,
+			UpdatedAt:        now,
+			ExpiresAt:        now.Add(time.Duration(cfg.TxnExpirationSeconds()) * time.Second),
 		}
 
 		if err := st.Create(r.Context(), rec); err != nil {

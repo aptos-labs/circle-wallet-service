@@ -1,0 +1,113 @@
+package webhook
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"math"
+	"net/http"
+	"time"
+)
+
+type Worker struct {
+	store      WebhookStore
+	httpClient *http.Client
+	maxRetries int
+	logger     *slog.Logger
+}
+
+func NewWorker(ws WebhookStore, maxRetries int, timeout time.Duration, logger *slog.Logger) *Worker {
+	return &Worker{
+		store:      ws,
+		httpClient: &http.Client{Timeout: timeout},
+		maxRetries: maxRetries,
+		logger:     logger,
+	}
+}
+
+func (w *Worker) Run(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.processBatch(ctx)
+		}
+	}
+}
+
+func (w *Worker) processBatch(ctx context.Context) {
+	records, err := w.store.ClaimPendingDeliveries(ctx, 50)
+	if err != nil {
+		w.logger.Error("webhook worker: claim deliveries", "error", err)
+		return
+	}
+	for _, rec := range records {
+		w.deliver(ctx, rec)
+	}
+}
+
+func (w *Worker) deliver(ctx context.Context, rec *DeliveryRecord) {
+	now := time.Now().UTC()
+	rec.Attempts++
+	rec.LastAttemptAt = &now
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rec.URL, bytes.NewReader([]byte(rec.Payload)))
+	if err != nil {
+		rec.Status = "failed"
+		rec.LastError = fmt.Sprintf("build request: %v", err)
+		w.update(ctx, rec)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := w.httpClient.Do(req)
+	if err != nil {
+		w.handleRetry(ctx, rec, fmt.Sprintf("http error: %v", err))
+		return
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		rec.Status = "delivered"
+		rec.LastError = ""
+		w.logger.Info("webhook delivered", "delivery_id", rec.ID, "txn_id", rec.TransactionID)
+		w.update(ctx, rec)
+		return
+	}
+
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		rec.Status = "failed"
+		rec.LastError = fmt.Sprintf("client error: %d", resp.StatusCode)
+		w.update(ctx, rec)
+		return
+	}
+
+	w.handleRetry(ctx, rec, fmt.Sprintf("server error: %d", resp.StatusCode))
+}
+
+func (w *Worker) handleRetry(ctx context.Context, rec *DeliveryRecord, errMsg string) {
+	rec.LastError = errMsg
+	if rec.Attempts >= w.maxRetries {
+		rec.Status = "failed"
+		w.logger.Error("webhook retries exhausted", "delivery_id", rec.ID, "txn_id", rec.TransactionID)
+	} else {
+		backoff := math.Pow(2, float64(rec.Attempts))
+		if backoff > 300 {
+			backoff = 300
+		}
+		rec.NextRetryAt = time.Now().UTC().Add(time.Duration(backoff) * time.Second)
+		rec.Status = "pending"
+	}
+	w.update(ctx, rec)
+}
+
+func (w *Worker) update(ctx context.Context, rec *DeliveryRecord) {
+	if err := w.store.UpdateDelivery(ctx, rec); err != nil {
+		w.logger.Error("webhook worker: update delivery", "delivery_id", rec.ID, "error", err)
+	}
+}

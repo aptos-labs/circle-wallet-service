@@ -43,11 +43,13 @@ func (s *Store) Create(ctx context.Context, rec *store.TransactionRecord) error 
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO transactions (
-			id, sender_address, wallet_id, status, sequence_number, function_id, payload_json,
+			id, sender_address, wallet_id, fee_payer_wallet_id, fee_payer_address,
+			status, sequence_number, function_id, payload_json,
 			max_gas_amount, idempotency_key, txn_hash, error_message, webhook_url, attempt_count, last_error,
 			created_at, updated_at, expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		rec.ID, rec.SenderAddress, rec.WalletID, string(rec.Status), nullU64(rec.SequenceNumber),
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.SenderAddress, rec.WalletID, nullStr(rec.FeePayerWalletID), nullStr(rec.FeePayerAddress),
+		string(rec.Status), nullU64(rec.SequenceNumber),
 		rec.FunctionID, rec.PayloadJSON, maxGas, idemp, nullStr(rec.TxnHash),
 		nullStr(rec.ErrorMessage), nullStr(rec.WebhookURL), rec.AttemptCount, nullStr(rec.LastError),
 		rec.CreatedAt, rec.UpdatedAt, rec.ExpiresAt,
@@ -76,11 +78,13 @@ func (s *Store) Update(ctx context.Context, rec *store.TransactionRecord) error 
 	}
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE transactions SET
-			sender_address = ?, wallet_id = ?, status = ?, sequence_number = ?, function_id = ?, payload_json = ?,
+			sender_address = ?, wallet_id = ?, fee_payer_wallet_id = ?, fee_payer_address = ?,
+			status = ?, sequence_number = ?, function_id = ?, payload_json = ?,
 			max_gas_amount = ?, idempotency_key = ?, txn_hash = ?, error_message = ?, webhook_url = ?,
 			attempt_count = ?, last_error = ?, updated_at = ?, expires_at = ?
 		WHERE id = ?`,
-		rec.SenderAddress, rec.WalletID, string(rec.Status), nullU64(rec.SequenceNumber),
+		rec.SenderAddress, rec.WalletID, nullStr(rec.FeePayerWalletID), nullStr(rec.FeePayerAddress),
+		string(rec.Status), nullU64(rec.SequenceNumber),
 		rec.FunctionID, rec.PayloadJSON, maxGas, idemp, nullStr(rec.TxnHash),
 		nullStr(rec.ErrorMessage), nullStr(rec.WebhookURL), rec.AttemptCount, nullStr(rec.LastError),
 		time.Now().UTC(), rec.ExpiresAt, rec.ID,
@@ -98,10 +102,47 @@ func (s *Store) Update(ctx context.Context, rec *store.TransactionRecord) error 
 	return nil
 }
 
+// UpdateIfStatus atomically updates the record only if its current status matches expectedStatus.
+// Returns true if the row was updated, false if another host already changed its status.
+func (s *Store) UpdateIfStatus(ctx context.Context, rec *store.TransactionRecord, expected store.TxnStatus) (bool, error) {
+	var maxGas sql.NullInt64
+	if rec.MaxGasAmount != nil {
+		maxGas = sql.NullInt64{Int64: int64(*rec.MaxGasAmount), Valid: true}
+	}
+	var idemp any
+	if strings.TrimSpace(rec.IdempotencyKey) != "" {
+		idemp = rec.IdempotencyKey
+	} else {
+		idemp = nil
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE transactions SET
+			sender_address = ?, wallet_id = ?, fee_payer_wallet_id = ?, fee_payer_address = ?,
+			status = ?, sequence_number = ?, function_id = ?, payload_json = ?,
+			max_gas_amount = ?, idempotency_key = ?, txn_hash = ?, error_message = ?, webhook_url = ?,
+			attempt_count = ?, last_error = ?, updated_at = ?, expires_at = ?
+		WHERE id = ? AND status = ?`,
+		rec.SenderAddress, rec.WalletID, nullStr(rec.FeePayerWalletID), nullStr(rec.FeePayerAddress),
+		string(rec.Status), nullU64(rec.SequenceNumber),
+		rec.FunctionID, rec.PayloadJSON, maxGas, idemp, nullStr(rec.TxnHash),
+		nullStr(rec.ErrorMessage), nullStr(rec.WebhookURL), rec.AttemptCount, nullStr(rec.LastError),
+		time.Now().UTC(), rec.ExpiresAt, rec.ID, string(expected),
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // Get returns a record by id.
 func (s *Store) Get(ctx context.Context, id string) (*store.TransactionRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, COALESCE(idempotency_key, ''), status, COALESCE(txn_hash, ''), sender_address, wallet_id,
+			COALESCE(fee_payer_wallet_id, ''), COALESCE(fee_payer_address, ''),
 			COALESCE(payload_json, ''), sequence_number, max_gas_amount,
 			COALESCE(error_message, ''), COALESCE(webhook_url, ''), attempt_count, COALESCE(last_error, ''),
 			created_at, updated_at, expires_at, function_id
@@ -116,6 +157,7 @@ func (s *Store) GetByIdempotencyKey(ctx context.Context, key string) (*store.Tra
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, COALESCE(idempotency_key, ''), status, COALESCE(txn_hash, ''), sender_address, wallet_id,
+			COALESCE(fee_payer_wallet_id, ''), COALESCE(fee_payer_address, ''),
 			COALESCE(payload_json, ''), sequence_number, max_gas_amount,
 			COALESCE(error_message, ''), COALESCE(webhook_url, ''), attempt_count, COALESCE(last_error, ''),
 			created_at, updated_at, expires_at, function_id
@@ -127,6 +169,7 @@ func (s *Store) GetByIdempotencyKey(ctx context.Context, key string) (*store.Tra
 func (s *Store) ListByStatus(ctx context.Context, status store.TxnStatus) ([]*store.TransactionRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, COALESCE(idempotency_key, ''), status, COALESCE(txn_hash, ''), sender_address, wallet_id,
+			COALESCE(fee_payer_wallet_id, ''), COALESCE(fee_payer_address, ''),
 			COALESCE(payload_json, ''), sequence_number, max_gas_amount,
 			COALESCE(error_message, ''), COALESCE(webhook_url, ''), attempt_count, COALESCE(last_error, ''),
 			created_at, updated_at, expires_at, function_id
@@ -156,6 +199,7 @@ func scanRecord(row *sql.Row) (*store.TransactionRecord, error) {
 	var payload sql.NullString
 	err := row.Scan(
 		&rec.ID, &rec.IdempotencyKey, &statusStr, &rec.TxnHash, &rec.SenderAddress, &rec.WalletID,
+		&rec.FeePayerWalletID, &rec.FeePayerAddress,
 		&payload, &seq, &maxGas,
 		&rec.ErrorMessage, &rec.WebhookURL, &rec.AttemptCount, &rec.LastError,
 		&rec.CreatedAt, &rec.UpdatedAt, &rec.ExpiresAt, &rec.FunctionID,
@@ -189,6 +233,7 @@ func scanRecordRows(rows *sql.Rows) (*store.TransactionRecord, error) {
 	var payload sql.NullString
 	err := rows.Scan(
 		&rec.ID, &rec.IdempotencyKey, &statusStr, &rec.TxnHash, &rec.SenderAddress, &rec.WalletID,
+		&rec.FeePayerWalletID, &rec.FeePayerAddress,
 		&payload, &seq, &maxGas,
 		&rec.ErrorMessage, &rec.WebhookURL, &rec.AttemptCount, &rec.LastError,
 		&rec.CreatedAt, &rec.UpdatedAt, &rec.ExpiresAt, &rec.FunctionID,

@@ -14,7 +14,7 @@
 //	E2E_API_KEY          — must match the server's API_KEY
 //	E2E_WALLET_ID        — Circle wallet ID (or first entry in CIRCLE_WALLETS)
 //	E2E_WALLET_ADDR      — Aptos address
-//	E2E_WALLET_PUBLIC_KEY — Ed25519 public key hex (required for inline-wallet tests if not in CIRCLE_WALLETS JSON)
+//	E2E_WALLET_PUBLIC_KEY — optional; retained in CIRCLE_WALLETS JSON for local reference (not sent to the API)
 //	E2E_WALLET2_*        — second wallet for dual-wallet throughput (or CIRCLE_WALLETS[1])
 //	E2E_THROUGHPUT       — concurrent executes per wallet in throughput tests (default 8, max 50)
 //	E2E_MYSQL_DSN        — optional; for stale-processing recovery test (defaults to MYSQL_DSN)
@@ -32,7 +32,9 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -340,23 +342,20 @@ func TestQueryViewFunction(t *testing.T) {
 	}
 }
 
-func transferExecuteBody(walletIDStr, toAddr string) map[string]any {
+func transferExecuteBody(w e2eWallet, toAddr string) map[string]any {
 	return map[string]any{
-		"wallet_id":      walletIDStr,
+		"wallet_id":      w.WalletID,
+		"address":        w.Address,
 		"function_id":    "0x1::aptos_account::transfer",
 		"type_arguments": []string{},
 		"arguments":      []any{toAddr, "1"},
 	}
 }
 
-// transferExecuteBodyInline sends only the wallet object (no server-config wallet_id lookup).
 func transferExecuteBodyInline(w e2eWallet, toAddr string) map[string]any {
 	return map[string]any{
-		"wallet": map[string]string{
-			"wallet_id":  w.WalletID,
-			"address":    w.Address,
-			"public_key": w.PublicKey,
-		},
+		"wallet_id":      w.WalletID,
+		"address":        w.Address,
 		"function_id":    "0x1::aptos_account::transfer",
 		"type_arguments": []string{},
 		"arguments":      []any{toAddr, "1"},
@@ -451,7 +450,7 @@ func TestExecuteAndPoll(t *testing.T) {
 		t.Skip("E2E_WALLET_* or CIRCLE_WALLETS[0] — skipping execute test")
 	}
 
-	status, txID, body := postExecute(t, transferExecuteBody(w.WalletID, w.Address))
+	status, txID, body := postExecute(t, transferExecuteBody(w, w.Address))
 	t.Logf("Execute response (%d): %s", status, body)
 
 	if status != 202 {
@@ -474,11 +473,10 @@ func TestExecuteAndPoll(t *testing.T) {
 	pollUntilConfirmed(t, txID, 5*time.Second, 90*time.Second)
 }
 
-// TestExecuteInlineWallet uses request body wallet only (submitter reads QueuedPayload.Wallet).
 func TestExecuteInlineWallet(t *testing.T) {
 	w, ok := wallet1()
-	if !ok || w.PublicKey == "" {
-		t.Skip("wallet with public_key required for inline execute (set in CIRCLE_WALLETS or E2E_WALLET_PUBLIC_KEY)")
+	if !ok {
+		t.Skip("E2E_WALLET_* or CIRCLE_WALLETS[0] — skipping inline execute test")
 	}
 
 	body := transferExecuteBodyInline(w, w.Address)
@@ -492,13 +490,100 @@ func TestExecuteInlineWallet(t *testing.T) {
 	pollUntilConfirmed(t, txID, 5*time.Second, 90*time.Second)
 }
 
+func TestFeePayer(t *testing.T) {
+	w1, ok1 := wallet1()
+	w2, ok2 := wallet2()
+	if !ok1 || !ok2 {
+		t.Skip("need two wallets for fee payer test")
+	}
+	body := map[string]any{
+		"wallet_id":      w1.WalletID,
+		"address":        w1.Address,
+		"function_id":    "0x1::aptos_account::transfer",
+		"type_arguments": []string{},
+		"arguments":      []any{w2.Address, "1"},
+		"fee_payer": map[string]string{
+			"wallet_id": w2.WalletID,
+			"address":   w2.Address,
+		},
+	}
+	st, txID, b := postExecute(t, body)
+	if st != 202 {
+		t.Fatalf("expected 202, got %d: %s", st, b)
+	}
+	if txID == "" {
+		t.Fatal("expected transaction_id")
+	}
+	pollUntilConfirmed(t, txID, 5*time.Second, 90*time.Second)
+}
+
+func TestWebhookDeliveries(t *testing.T) {
+	w, ok := wallet1()
+	if !ok {
+		t.Skip("E2E_WALLET_* or CIRCLE_WALLETS[0] — skipping")
+	}
+	_, txID, eb := postExecute(t, transferExecuteBody(w, w.Address))
+	if txID == "" {
+		t.Fatalf("expected transaction_id: %s", eb)
+	}
+	pollUntilConfirmed(t, txID, 5*time.Second, 90*time.Second)
+
+	url := fmt.Sprintf("%s/v1/transactions/%s/webhooks", baseURL(), txID)
+	st, body := doRequest(t, "GET", url, nil, authHeaders())
+	if st != 200 {
+		t.Fatalf("expected 200 from webhook list, got %d: %s", st, body)
+	}
+	var deliveries []json.RawMessage
+	if err := json.Unmarshal(body, &deliveries); err != nil {
+		t.Fatalf("parse webhook deliveries: %v", err)
+	}
+	t.Logf("webhook deliveries: %d", len(deliveries))
+}
+
+func TestRateLimit429(t *testing.T) {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("E2E_RATE_LIMIT_TEST")))
+	if v != "1" && v != "true" && v != "yes" {
+		t.Skip("set E2E_RATE_LIMIT_TEST=1 when the server has rate_limit.enabled")
+	}
+	const workers = 64
+	const perWorker = 32
+	var saw429 atomic.Bool
+	var wg sync.WaitGroup
+	client := http.DefaultClient
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < perWorker; j++ {
+				if saw429.Load() {
+					return
+				}
+				resp, err := client.Get(baseURL() + "/v1/health")
+				if err != nil {
+					continue
+				}
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+				if resp.StatusCode == http.StatusTooManyRequests {
+					saw429.Store(true)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if !saw429.Load() {
+		t.Fatal("expected at least one HTTP 429 while hammering /v1/health")
+	}
+}
+
 // TestSubmittedAppearsBeforeConfirmed asserts poller-visible submitted state with hash.
 func TestSubmittedAppearsBeforeConfirmed(t *testing.T) {
 	w, ok := wallet1()
 	if !ok {
 		t.Skip("wallet not configured")
 	}
-	st, txID, b := postExecute(t, transferExecuteBody(w.WalletID, w.Address))
+	st, txID, b := postExecute(t, transferExecuteBody(w, w.Address))
 	if st != 202 {
 		t.Fatalf("expected 202: %s", b)
 	}
@@ -517,7 +602,7 @@ func TestThroughputConcurrentExecute(t *testing.T) {
 	}
 
 	n := e2eThroughputCount()
-	base := transferExecuteBody(w.WalletID, w.Address)
+	base := transferExecuteBody(w, w.Address)
 
 	ids := make([]string, 0, n)
 	var mu sync.Mutex
@@ -576,7 +661,7 @@ func TestThroughputDualWalletConcurrent(t *testing.T) {
 	w1, ok1 := wallet1()
 	w2, ok2 := wallet2()
 	if !ok1 || !ok2 {
-		t.Skip("need two wallets (CIRCLE_WALLETS[2] or E2E_WALLET2_*) with public_key — skipping")
+		t.Skip("need two wallets (CIRCLE_WALLETS[2] or E2E_WALLET2_*) — skipping")
 	}
 	if w1.Address == w2.Address {
 		t.Fatal("wallet1 and wallet2 must be different addresses")
@@ -611,7 +696,7 @@ func TestThroughputDualWalletConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			body := transferExecuteBody(j.w.WalletID, j.w.Address)
+			body := transferExecuteBody(j.w, j.w.Address)
 			st, txID, b := postExecute(t, body)
 			if st != 202 {
 				errs <- fmt.Errorf("execute: status %d: %s", st, b)
@@ -685,7 +770,7 @@ func TestIdempotencyReplayRecovery(t *testing.T) {
 	}
 
 	key := fmt.Sprintf("e2e-idemp-body-%d", time.Now().UnixNano())
-	body := transferExecuteBody(w.WalletID, w.Address)
+	body := transferExecuteBody(w, w.Address)
 	body["idempotency_key"] = key
 
 	st1, id1, b1, h1 := postExecuteWithHeaders(t, body, nil)
@@ -732,7 +817,7 @@ func TestIdempotencyKeyHeader(t *testing.T) {
 	}
 
 	key := fmt.Sprintf("e2e-idemp-hdr-%d", time.Now().UnixNano())
-	body := transferExecuteBody(w.WalletID, w.Address)
+	body := transferExecuteBody(w, w.Address)
 
 	st1, id1, b1, h1 := postExecuteWithHeaders(t, body, map[string]string{"Idempotency-Key": key})
 	if st1 != 202 {
@@ -780,7 +865,7 @@ func TestStaleProcessingRecovery(t *testing.T) {
 		t.Skipf("mysql ping failed (skip stale test): %v", err)
 	}
 
-	body := transferExecuteBody(w.WalletID, w.Address)
+	body := transferExecuteBody(w, w.Address)
 	st, txID, b := postExecute(t, body)
 	if st != 202 {
 		t.Fatalf("enqueue: %d %s", st, b)
@@ -844,6 +929,7 @@ func TestInvalidEntryFunctionEventuallyFails(t *testing.T) {
 
 	reqBody := map[string]any{
 		"wallet_id":      w.WalletID,
+		"address":        w.Address,
 		"function_id":    "0x1::this_module_does_not_exist_e2e::fake",
 		"type_arguments": []string{},
 		"arguments":      []any{w.Address, "1"},
@@ -888,7 +974,7 @@ func TestStatusProgressionMonotonic(t *testing.T) {
 		t.Skip("wallet not configured — skipping")
 	}
 
-	st, txID, b := postExecute(t, transferExecuteBody(w.WalletID, w.Address))
+	st, txID, b := postExecute(t, transferExecuteBody(w, w.Address))
 	if st != 202 {
 		t.Fatalf("expected 202: %s", b)
 	}
