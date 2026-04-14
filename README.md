@@ -9,6 +9,7 @@ Generic REST API for interacting with Aptos Move contracts. Uses [Circle Program
 | `POST` | `/v1/execute` | Yes | Submit an entry function transaction (async, returns 202) |
 | `POST` | `/v1/query` | Yes | Call a view function (sync, returns 200) |
 | `GET` | `/v1/transactions/{id}` | Yes | Poll transaction status |
+| `GET` | `/v1/transactions/{id}/webhooks` | Yes | Webhook delivery history |
 | `GET` | `/v1/health` | No | Health check |
 
 ## Quick Start
@@ -90,7 +91,7 @@ Configure these **repository secrets** to run live E2E: `API_KEY`, `APTOS_NODE_U
 
 ## Configuration
 
-All configuration is via environment variables or a `.env` file in the project root.
+Configuration is loaded from `config.yaml` (or the path in `CONFIG_PATH`), with environment variables taking precedence. A `.env` file is also supported via godotenv.
 
 ### Server
 
@@ -121,36 +122,37 @@ The server runs embedded migrations on startup. `GET /v1/health?deep=1` checks d
 |----------|---------|-------------|
 | `CIRCLE_API_KEY` | *(required)* | Circle API key |
 | `CIRCLE_ENTITY_SECRET` | *(required)* | 32-byte hex entity secret |
-| `CIRCLE_WALLETS` | `[]` | JSON array of wallet objects (see below) |
 | `CIRCLE_WALLET_SET_ID` | | Wallet set ID (only needed for `make create-wallets`) |
 
-**`CIRCLE_WALLETS` format:**
-
-```json
-[
-  {
-    "wallet_id": "uuid",
-    "address": "0xAPTOS_ADDRESS",
-    "public_key": "0xED25519_PUBLIC_KEY"
-  }
-]
-```
-
-If `public_key` is omitted, it is fetched from Circle at server startup.
+Wallet IDs and addresses are provided per-request in the API (not in server config). Public keys are resolved automatically from Circle.
 
 ### Transaction Settings
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MAX_GAS_AMOUNT` | `100000` | Default max gas per transaction |
-| `TXN_EXPIRATION_SECONDS` | `60` | On-chain transaction expiration window |
-| `POLL_INTERVAL_SECONDS` | `5` | Background poller check interval |
+| Variable / YAML | Default | Description |
+|-----------------|---------|-------------|
+| `MAX_GAS_AMOUNT` / `transaction.max_gas_amount` | `2000000` | Default max gas per transaction |
+| `TXN_EXPIRATION_SECONDS` / `transaction.expiration_seconds` | `60` | On-chain transaction expiration window |
+| `WEBHOOK_URL` / `webhook.global_url` | *(empty)* | Global webhook URL for status notifications |
 
-### Webhooks
+### Submitter & Poller
 
-| Variable | Default | Description |
+Configurable in `config.yaml` (see `config.yaml` for full list):
+
+| YAML key | Default | Description |
 |----------|---------|-------------|
-| `WEBHOOK_URL` | *(empty)* | Global webhook URL for transaction status notifications |
+| `submitter.poll_interval_ms` | `200` | How often the dispatcher checks for queued work |
+| `submitter.signing_pipeline_depth` | `4` | How many transactions to sign ahead per sender |
+| `submitter.max_retry_duration_seconds` | `300` | Max time before marking a transaction permanently failed |
+| `submitter.retry_interval_seconds` | `5` | Base retry interval on transient failure |
+| `poller.interval_seconds` | `5` | How often to poll on-chain for submitted transactions |
+
+### Rate Limiting
+
+| YAML key | Default | Description |
+|----------|---------|-------------|
+| `rate_limit.enabled` | `false` | Enable upstream rate limiting |
+| `rate_limit.requests_per_second` | `100` | Global rate limit |
+| `rate_limit.burst` | `200` | Burst capacity |
 
 ## API Reference
 
@@ -177,23 +179,30 @@ Submit an entry function transaction for async execution.
 ```json
 {
   "wallet_id": "circle-wallet-uuid",
+  "address": "0xSENDER_ADDRESS",
   "function_id": "0x1::aptos_account::transfer",
   "type_arguments": [],
   "arguments": ["0xRECIPIENT_ADDRESS", "100"],
   "max_gas_amount": 50000,
-  "webhook_url": "https://example.com/hook"
+  "webhook_url": "https://example.com/hook",
+  "fee_payer": {
+    "wallet_id": "fee-payer-wallet-uuid",
+    "address": "0xFEE_PAYER_ADDRESS"
+  }
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `wallet_id` | string | Yes | Circle wallet UUID **or** Aptos address |
+| `wallet_id` | string | Yes | Circle wallet UUID |
+| `address` | string | Yes | Aptos sender address |
 | `function_id` | string | Yes | `address::module::function` |
 | `type_arguments` | string[] | No | Move type arguments |
 | `arguments` | any[] | No | Function arguments (types resolved from on-chain ABI) |
 | `max_gas_amount` | uint64 | No | Override default max gas |
 | `webhook_url` | string | No | Per-request webhook URL |
 | `idempotency_key` | string | No | Optional idempotency key (also accepted as `Idempotency-Key` header) |
+| `fee_payer` | object | No | Separate fee-payer wallet: `{"wallet_id": "...", "address": "..."}` |
 
 **Response (202 Accepted):** The request is persisted and queued. A background worker assigns the Aptos account sequence number, signs via Circle, and submits to the network.
 
@@ -324,7 +333,86 @@ On failure, `error_message` is included:
 }
 ```
 
-**Delivery:** async, best-effort, up to 3 retries with backoff (1s, 2s, 3s). No retry on 4xx client errors.
+**Delivery:** Persistent outbox — deliveries are stored in MySQL and delivered by a background worker with exponential backoff (up to 5 retries). 4xx client errors are not retried.
+
+**Delivery status:** `GET /v1/transactions/{id}/webhooks` returns the delivery history for a transaction:
+
+```json
+[
+  {
+    "id": "delivery-uuid",
+    "transaction_id": "txn-uuid",
+    "url": "https://example.com/hook",
+    "status": "delivered",
+    "attempts": 1,
+    "created_at": "2026-03-27T18:42:16Z"
+  }
+]
+```
+
+## High Throughput
+
+The server processes transactions **FIFO per sender** but **in parallel across senders**. Using N wallets gives approximately N× throughput.
+
+### Key Patterns
+
+1. **Multi-wallet parallelism** — Round-robin requests across wallets. Each sender gets its own worker with a signing pipeline.
+2. **Fire-and-forget with webhooks** — Pass `webhook_url` to skip polling. The server delivers completion status via HTTP POST.
+3. **Idempotency keys** — Always include `idempotency_key` in production. Safe to retry on network errors.
+4. **Respect backpressure** — If you get HTTP 429, honor the `Retry-After` header.
+
+### Server Tuning (`config.yaml`)
+
+```yaml
+submitter:
+  poll_interval_ms: 100          # lower = faster job pickup (default 200)
+  signing_pipeline_depth: 8      # sign ahead while submitting (default 4)
+  retry_interval_seconds: 3      # retry on transient failure (default 5)
+
+rate_limit:
+  enabled: true
+  requests_per_second: 500       # upstream protection
+  burst: 1000
+```
+
+### Throughput Estimates
+
+| Wallets | Pipeline Depth | Expected Throughput |
+|---------|----------------|---------------------|
+| 1       | 4              | ~2-4 txn/s          |
+| 4       | 4              | ~8-16 txn/s         |
+| 10      | 8              | ~20-40 txn/s        |
+
+Throughput is bounded by Circle signing latency (~200-500ms) and Aptos block time (~1-2s). The pipeline overlaps signing and submission to maximize throughput per wallet.
+
+### Examples
+
+Complete runnable examples in 4 languages live in `examples/high_throughput/`:
+
+```bash
+# Go (recommended — same language as the server)
+export API_KEY=your-token
+export WALLETS='[{"wallet_id":"w1","address":"0xabc"},{"wallet_id":"w2","address":"0xdef"}]'
+export TXN_COUNT=20
+go run ./examples/high_throughput
+
+# Python (requires: pip install aiohttp)
+python examples/high_throughput/python_example.py
+
+# TypeScript (requires: Node 18+)
+npx tsx examples/high_throughput/typescript_example.ts
+
+# Shell/curl (single + batch examples)
+bash examples/high_throughput/curl_examples.sh
+```
+
+Each example demonstrates:
+- Round-robin wallet assignment for max parallelism
+- Semaphore-bounded concurrent submissions
+- Idempotency keys for safe retries
+- Exponential backoff polling with jitter
+- Webhook listener setup
+- Throughput stats at the end
 
 ## CLI
 
@@ -364,7 +452,7 @@ cmd/
   server/main.go            HTTP server, wiring, graceful shutdown
   cli/main.go               CLI for testing against a running server
 internal/
-  config/                   Env-based configuration with .env support
+  config/                   YAML + env config with .env support
   aptos/
     abi.go                  ABI cache — fetches and caches module ABIs from Aptos node
     args.go                 BCS serialization — converts JSON arguments to BCS bytes by Move type
@@ -372,34 +460,45 @@ internal/
   circle/
     client.go               Circle HTTP client — RSA key cache, entity secret encryption, sign/transaction
     signer.go               Fee-payer transaction signing via Circle's sign/transaction endpoint
+    pubkey_cache.go         Auto-resolves wallet public keys from Circle (lazy, thread-safe)
   handler/
     handler.go              Shared JSON response helpers
-    execute.go              POST /v1/execute — validate and enqueue transaction
-    submitter/              Background worker — sequence reconcile, build, sign, submit
+    execute.go              POST /v1/execute — validate, enqueue with optional fee-payer
     query.go                POST /v1/query — ABI resolve, BCS serialize, call view
     transaction.go          GET /v1/transactions/{id} — status lookup
+    webhook.go              GET /v1/transactions/{id}/webhooks — delivery history
+    ratelimit.go            Opt-in global rate limiting middleware
+  submitter/
+    submitter.go            Dispatcher + per-sender workers with signing pipeline
   store/
-    store.go                Store interface and TransactionRecord type
-    memory.go               In-memory implementation with TTL-based eviction
+    store.go                Store + Queue interfaces, TransactionRecord
+    memory.go               In-memory implementation for testing
+    mysql/                  MySQL implementation — atomic sequence, claim, shift, webhook outbox
   poller/
-    poller.go               Background goroutine — polls submitted txns, updates status, fires webhooks
+    poller.go               Confirms submitted txns, conditional updates (multi-host safe)
   webhook/
-    notifier.go             Async webhook delivery with retries
+    notifier.go             Writes delivery records to persistent outbox
+    worker.go               Background delivery worker with exponential backoff
+    store.go                WebhookStore interface + DeliveryRecord
+  db/migrations/            Embedded SQL migrations (auto-applied on startup)
 examples/
   e2e_test.go               End-to-end tests against a running server
+  high_throughput/           High-speed usage examples (Go, Python, TypeScript, curl)
   create_wallets/main.go    Helper to create Circle wallets on Aptos testnet
+config.yaml                 Default configuration with all tunables
 ```
 
 ### Signing Flow
 
 Per the [Circle Aptos Signing APIs Tutorial](https://developers.circle.com):
 
-1. Load queued payload from MySQL; build entry function from ABI-resolved JSON arguments
-2. Reconcile Aptos account `sequence_number` with MySQL `account_sequences` (use the maximum)
-3. Build fee-payer `RawTransactionWithData` via `BuildTransactionMultiAgent` with `FeePayer`, explicit `SequenceNumber`, gas, and expiration
-4. BCS-serialize the `RawTransactionWithData` to hex
-5. Send to Circle `sign/transaction` with encrypted entity secret
-6. Build `FeePayerTransactionAuthenticator` and submit signed transaction to Aptos
+1. Dispatcher spawns a per-sender worker; worker claims a queued transaction (atomically allocates sequence number)
+2. Build entry function from ABI-resolved JSON arguments
+3. Resolve public key from Circle (cached) via `PublicKeyCache`
+4. Build fee-payer `RawTransactionWithData` with explicit `SequenceNumber`, gas, and expiration
+5. BCS-serialize and send to Circle `sign/transaction` (sender wallet, and separately fee-payer wallet if different)
+6. Assemble `FeePayerTransactionAuthenticator` and submit to Aptos
+7. Pipeline: while step 6 executes, the worker starts steps 1-5 for the next transaction
 
 ### ABI Resolution
 
@@ -415,7 +514,7 @@ Supported Move types: `address`, `bool`, `u8`, `u16`, `u32`, `u64`, `u128`, `u25
 
 ### Persistence and sequencing
 
-Transactions and per-sender Aptos sequence state are stored in **MySQL**. `POST /v1/execute` inserts a `queued` row; the **submitter** worker claims work in FIFO order (by `created_at`), reconciles `account_sequences` with the on-chain account resource, builds a fee-payer transaction with an explicit sequence number, signs via Circle, and submits. The **poller** confirms or fails submitted transactions by hash.
+Transactions and per-sender Aptos sequence state are stored in **MySQL**. `POST /v1/execute` inserts a `queued` row; the **submitter** dispatcher spawns a worker per sender address. Each worker claims transactions FIFO, atomically allocating a sequence number in the same SQL transaction (`SELECT ... FOR UPDATE` + increment). Workers operate a signing pipeline — signing the next transaction while the current one is being submitted. The **poller** confirms or fails submitted transactions by hash, using conditional updates (`WHERE status = 'submitted'`) to prevent duplicate processing across multiple server instances. On permanent failure, subsequent transactions for the same sender are automatically shifted (re-queued with new sequence numbers).
 
 ## Make Targets
 
