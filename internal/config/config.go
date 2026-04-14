@@ -384,4 +384,3 @@ func env(key, defaultVal string) string {
 	}
 	return defaultVal
 }
-

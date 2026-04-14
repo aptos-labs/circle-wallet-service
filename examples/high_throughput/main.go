@@ -154,10 +154,10 @@ func submitTransactions(ctx context.Context, cfg config) []submitResult {
 			defer func() { <-sem }()
 
 			body := map[string]any{
-				"wallet_id":      w.WalletID,
-				"address":        w.Address,
-				"function_id":    "0x1::aptos_account::transfer",
-				"arguments":      []any{w.Address, "1"},
+				"wallet_id":       w.WalletID,
+				"address":         w.Address,
+				"function_id":     "0x1::aptos_account::transfer",
+				"arguments":       []any{w.Address, "1"},
 				"idempotency_key": idempKey,
 			}
 
@@ -270,10 +270,10 @@ func demonstrateIdempotency(ctx context.Context, cfg config) {
 	idempKey := "demo-idemp-" + uuid.New().String()
 
 	body := map[string]any{
-		"wallet_id":      w.WalletID,
-		"address":        w.Address,
-		"function_id":    "0x1::aptos_account::transfer",
-		"arguments":      []any{w.Address, "1"},
+		"wallet_id":       w.WalletID,
+		"address":         w.Address,
+		"function_id":     "0x1::aptos_account::transfer",
+		"arguments":       []any{w.Address, "1"},
 		"idempotency_key": idempKey,
 	}
 
