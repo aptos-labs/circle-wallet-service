@@ -29,6 +29,10 @@ func (s *stubWebhookStore) UpdateDelivery(context.Context, *webhook.DeliveryReco
 	return nil
 }
 
+func (s *stubWebhookStore) RecoverStaleDeliveries(context.Context, time.Duration) (int64, error) {
+	return 0, nil
+}
+
 func (s *stubWebhookStore) ListByTransactionID(_ context.Context, txnID string) ([]*webhook.DeliveryRecord, error) {
 	if s.err != nil {
 		return nil, s.err

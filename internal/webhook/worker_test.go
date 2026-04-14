@@ -51,6 +51,10 @@ func (m *mockWorkerStore) ListByTransactionID(context.Context, string) ([]*Deliv
 	return nil, nil
 }
 
+func (m *mockWorkerStore) RecoverStaleDeliveries(_ context.Context, _ time.Duration) (int64, error) {
+	return 0, nil
+}
+
 func TestDeliverSuccess(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

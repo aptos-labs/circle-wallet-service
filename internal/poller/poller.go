@@ -14,7 +14,7 @@ type aptosTxnClient interface {
 }
 
 type notifyHook interface {
-	Notify(rec *store.TransactionRecord)
+	Notify(ctx context.Context, rec *store.TransactionRecord)
 }
 
 type Poller struct {
@@ -55,23 +55,35 @@ func (p *Poller) poll(ctx context.Context) {
 		return
 	}
 	for _, rec := range records {
-		if time.Now().UTC().After(rec.ExpiresAt) {
-			rec.Status = store.StatusExpired
-			rec.ErrorMessage = "transaction expired on-chain"
-			updated, err := p.store.UpdateIfStatus(ctx, rec, store.StatusSubmitted)
-			if err != nil {
-				p.logger.Error("poller: update expired", "txn_id", rec.ID, "error", err)
-			}
-			if updated {
-				p.notifier.Notify(rec)
-			}
-			continue
-		}
 		if rec.TxnHash == "" {
+			if time.Now().UTC().After(rec.ExpiresAt) {
+				rec.Status = store.StatusExpired
+				rec.ErrorMessage = "transaction expired without submission hash"
+				updated, err := p.store.UpdateIfStatus(ctx, rec, store.StatusSubmitted)
+				if err != nil {
+					p.logger.Error("poller: update expired", "txn_id", rec.ID, "error", err)
+				}
+				if updated {
+					p.notifier.Notify(ctx, rec)
+				}
+			}
 			continue
 		}
 		txn, err := p.client.TransactionByHash(rec.TxnHash)
 		if err != nil {
+			if time.Now().UTC().After(rec.ExpiresAt) {
+				rec.Status = store.StatusExpired
+				rec.ErrorMessage = "transaction expired; on-chain lookup failed"
+				updated, uerr := p.store.UpdateIfStatus(ctx, rec, store.StatusSubmitted)
+				if uerr != nil {
+					p.logger.Error("poller: update expired", "txn_id", rec.ID, "error", uerr)
+				}
+				if updated {
+					p.notifier.Notify(ctx, rec)
+				}
+			} else {
+				p.logger.Warn("poller: txn lookup error", "txn_id", rec.ID, "hash", rec.TxnHash, "error", err)
+			}
 			continue
 		}
 		success := txn.Success()
@@ -90,7 +102,7 @@ func (p *Poller) poll(ctx context.Context) {
 			continue
 		}
 		if updated {
-			p.notifier.Notify(rec)
+			p.notifier.Notify(ctx, rec)
 		}
 	}
 }

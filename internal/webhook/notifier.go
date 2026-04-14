@@ -34,7 +34,7 @@ func NewNotifier(globalURL string, ws WebhookStore, logger *slog.Logger) *Notifi
 	}
 }
 
-func (n *Notifier) Notify(rec *store.TransactionRecord) {
+func (n *Notifier) Notify(ctx context.Context, rec *store.TransactionRecord) {
 	url := rec.WebhookURL
 	if url == "" {
 		url = n.globalURL
@@ -68,7 +68,7 @@ func (n *Notifier) Notify(rec *store.TransactionRecord) {
 		NextRetryAt:   now,
 		CreatedAt:     now,
 	}
-	if err := n.store.CreateDelivery(context.Background(), delivery); err != nil {
+	if err := n.store.CreateDelivery(ctx, delivery); err != nil {
 		n.logger.Error("webhook outbox insert failed", "txn_id", rec.ID, "error", err)
 	}
 }

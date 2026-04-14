@@ -42,13 +42,13 @@ func (rl *RateLimitMiddleware) Wrap(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if !rl.global.Allow() {
-			rsv := rl.global.Reserve()
-			sec := int(math.Ceil(rsv.Delay().Seconds()))
+		rsv := rl.global.Reserve()
+		if delay := rsv.Delay(); delay > 0 {
+			rsv.Cancel()
+			sec := int(math.Ceil(delay.Seconds()))
 			if sec < 1 {
 				sec = 1
 			}
-			rsv.Cancel()
 			w.Header().Set("Retry-After", strconv.Itoa(sec))
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)

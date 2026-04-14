@@ -253,13 +253,13 @@ func TestPrepareRecord_MaxRetryDurationMarksFailed(t *testing.T) {
 
 type noopNotifier struct{}
 
-func (noopNotifier) Notify(*store.TransactionRecord) {}
+func (noopNotifier) Notify(context.Context, *store.TransactionRecord) {}
 
 type notifyRecorder struct {
 	count int
 }
 
-func (n *notifyRecorder) Notify(*store.TransactionRecord) {
+func (n *notifyRecorder) Notify(_ context.Context, _ *store.TransactionRecord) {
 	n.count++
 }
 

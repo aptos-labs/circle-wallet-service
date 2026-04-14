@@ -20,7 +20,7 @@ import (
 )
 
 type Notifier interface {
-	Notify(rec *store.TransactionRecord)
+	Notify(ctx context.Context, rec *store.TransactionRecord)
 }
 
 type transactionSubmitter interface {
@@ -353,12 +353,12 @@ func (s *Submitter) markPermanentFailure(ctx context.Context, rec *store.Transac
 	if err := s.queue.Update(ctx, rec); err != nil {
 		s.logger.Error("submitter: mark failed", "id", rec.ID, "error", err)
 	}
-	s.notifier.Notify(rec)
 	if rec.SequenceNumber != nil {
 		if err := s.queue.ShiftSenderSequences(ctx, rec.SenderAddress, *rec.SequenceNumber); err != nil {
 			s.logger.Error("submitter: shift sequences", "sender", rec.SenderAddress, "error", err)
 		}
 	}
+	s.notifier.Notify(ctx, rec)
 }
 
 func (s *Submitter) requeueTransient(ctx context.Context, rec *store.TransactionRecord, err error) {

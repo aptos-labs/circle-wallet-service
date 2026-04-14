@@ -34,7 +34,7 @@ type mockNotifier struct {
 	count int
 }
 
-func (m *mockNotifier) Notify(_ *store.TransactionRecord) {
+func (m *mockNotifier) Notify(_ context.Context, _ *store.TransactionRecord) {
 	m.mu.Lock()
 	m.count++
 	m.mu.Unlock()
@@ -239,8 +239,8 @@ func TestPoller_ExpiredTransaction(t *testing.T) {
 		logger:   slog.New(slog.DiscardHandler),
 	}
 	p.poll(context.Background())
-	if fetch.calls != 0 {
-		t.Fatalf("fetcher calls=%d", fetch.calls)
+	if fetch.calls != 1 {
+		t.Fatalf("fetcher calls=%d, want 1 (on-chain check before marking expired)", fetch.calls)
 	}
 	if n.calls() != 1 {
 		t.Fatalf("notifier calls=%d", n.calls())
