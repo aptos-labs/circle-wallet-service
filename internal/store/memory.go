@@ -79,6 +79,31 @@ func (s *MemoryStore) Update(_ context.Context, rec *TransactionRecord) error {
 	return nil
 }
 
+// UpdateIfStatus atomically updates the record only if its current status matches expectedStatus.
+func (s *MemoryStore) UpdateIfStatus(_ context.Context, rec *TransactionRecord, expected TxnStatus) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	old, exists := s.records[rec.ID]
+	if !exists || old.Status != expected {
+		return false, nil
+	}
+
+	if old.IdempotencyKey != "" && old.IdempotencyKey != rec.IdempotencyKey {
+		delete(s.idempotencyIdx, old.IdempotencyKey)
+	}
+
+	cp := *rec
+	cp.UpdatedAt = time.Now()
+	s.records[rec.ID] = &cp
+
+	if cp.IdempotencyKey != "" {
+		s.idempotencyIdx[cp.IdempotencyKey] = cp.ID
+	}
+
+	return true, nil
+}
+
 // Get returns a copy of the record with the given ID, or nil if not found.
 func (s *MemoryStore) Get(_ context.Context, id string) (*TransactionRecord, error) {
 	s.mu.RLock()

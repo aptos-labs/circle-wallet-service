@@ -254,3 +254,88 @@ func TestMemoryStore_Eviction(t *testing.T) {
 		t.Fatal("expected record to be evicted, but it still exists")
 	}
 }
+
+func TestMemoryStore_UpdateIfStatus(t *testing.T) {
+	t.Parallel()
+	s := NewMemoryStore(time.Hour)
+	defer func(s *MemoryStore) {
+		_ = s.Close()
+	}(s)
+
+	ctx := context.Background()
+	rec := &TransactionRecord{
+		ID:            "txn-if",
+		Status:        StatusQueued,
+		SenderAddress: "0xabc",
+		FunctionID:    "0x1::m::f",
+		WalletID:      "w",
+		PayloadJSON:   "{}",
+	}
+	if err := s.Create(ctx, rec); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	updated := *rec
+	updated.Status = StatusSubmitted
+	updated.TxnHash = "0xh"
+	ok, err := s.UpdateIfStatus(ctx, &updated, StatusSubmitted)
+	if err != nil {
+		t.Fatalf("UpdateIfStatus wrong expected: %v", err)
+	}
+	if ok {
+		t.Fatal("UpdateIfStatus should return false when status mismatch")
+	}
+	got, _ := s.Get(ctx, "txn-if")
+	if got.Status != StatusQueued {
+		t.Errorf("status = %q, want queued", got.Status)
+	}
+
+	updated2 := *got
+	updated2.Status = StatusSubmitted
+	updated2.TxnHash = "0xh2"
+	ok2, err := s.UpdateIfStatus(ctx, &updated2, StatusQueued)
+	if err != nil {
+		t.Fatalf("UpdateIfStatus: %v", err)
+	}
+	if !ok2 {
+		t.Fatal("UpdateIfStatus should succeed when status matches")
+	}
+	got2, _ := s.Get(ctx, "txn-if")
+	if got2.Status != StatusSubmitted || got2.TxnHash != "0xh2" {
+		t.Errorf("after update: %+v", got2)
+	}
+}
+
+func TestMemoryStore_FeePayerFields(t *testing.T) {
+	t.Parallel()
+	s := NewMemoryStore(time.Hour)
+	defer func(s *MemoryStore) {
+		_ = s.Close()
+	}(s)
+
+	ctx := context.Background()
+	rec := &TransactionRecord{
+		ID:               "txn-fp",
+		Status:           StatusQueued,
+		SenderAddress:    "0xs",
+		FunctionID:       "0x1::m::f",
+		WalletID:         "w",
+		FeePayerWalletID: "fp-wallet",
+		FeePayerAddress:  "0xfee",
+		PayloadJSON:      "{}",
+	}
+	if err := s.Create(ctx, rec); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, err := s.Get(ctx, "txn-fp")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.FeePayerWalletID != "fp-wallet" {
+		t.Errorf("FeePayerWalletID = %q", got.FeePayerWalletID)
+	}
+	if got.FeePayerAddress != "0xfee" {
+		t.Errorf("FeePayerAddress = %q", got.FeePayerAddress)
+	}
+}
+
