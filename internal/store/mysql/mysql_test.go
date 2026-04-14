@@ -5,6 +5,8 @@ package mysql
 import (
 	"context"
 	"os"
+	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -562,5 +564,379 @@ func TestListByTransactionID(t *testing.T) {
 	}
 	if len(list) != 2 {
 		t.Fatalf("len %d", len(list))
+	}
+}
+
+func TestFullTransactionLifecycle(t *testing.T) {
+	s := testDB(t)
+	ctx := context.Background()
+	rec := testTxn("0xfullflow", store.StatusQueued)
+	if err := s.Create(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := s.ClaimNextQueuedForSender(ctx, rec.SenderAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed == nil || claimed.Status != store.StatusProcessing || claimed.SequenceNumber == nil || *claimed.SequenceNumber != 0 {
+		t.Fatalf("after claim: %+v", claimed)
+	}
+	hash := "0xabc123"
+	claimed.Status = store.StatusSubmitted
+	claimed.TxnHash = hash
+	if err := s.Update(ctx, claimed); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(ctx, rec.ID)
+	if err != nil || got == nil || got.Status != store.StatusSubmitted {
+		t.Fatalf("after submit: %+v err=%v", got, err)
+	}
+	got.Status = store.StatusConfirmed
+	ok, err := s.UpdateIfStatus(ctx, got, store.StatusSubmitted)
+	if err != nil || !ok {
+		t.Fatalf("confirm: ok=%v err=%v", ok, err)
+	}
+	final, err := s.Get(ctx, rec.ID)
+	if err != nil || final == nil || final.Status != store.StatusConfirmed || final.TxnHash != hash {
+		t.Fatalf("final: %+v err=%v", final, err)
+	}
+}
+
+func TestConcurrentClaimsDifferentSenders(t *testing.T) {
+	s := testDB(t)
+	ctx := context.Background()
+	sa, sb := "0xconcurrentA", "0xconcurrentB"
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	for i := range 5 {
+		ra := testTxn(sa, store.StatusQueued)
+		ra.ID = uuid.New().String()
+		ra.CreatedAt = now.Add(time.Duration(i) * time.Millisecond)
+		ra.UpdatedAt = ra.CreatedAt
+		if err := s.Create(ctx, ra); err != nil {
+			t.Fatal(err)
+		}
+		rb := testTxn(sb, store.StatusQueued)
+		rb.ID = uuid.New().String()
+		rb.CreatedAt = now.Add(time.Duration(i) * time.Millisecond)
+		rb.UpdatedAt = rb.CreatedAt
+		if err := s.Create(ctx, rb); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var seqA, seqB []uint64
+	var seqMu sync.Mutex
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 5 {
+			c, err := s.ClaimNextQueuedForSender(ctx, sa)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if c == nil || c.SequenceNumber == nil {
+				t.Error("nil claim A")
+				return
+			}
+			seqMu.Lock()
+			seqA = append(seqA, *c.SequenceNumber)
+			seqMu.Unlock()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 5 {
+			c, err := s.ClaimNextQueuedForSender(ctx, sb)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if c == nil || c.SequenceNumber == nil {
+				t.Error("nil claim B")
+				return
+			}
+			seqMu.Lock()
+			seqB = append(seqB, *c.SequenceNumber)
+			seqMu.Unlock()
+		}
+	}()
+	wg.Wait()
+	sort.Slice(seqA, func(i, j int) bool { return seqA[i] < seqA[j] })
+	sort.Slice(seqB, func(i, j int) bool { return seqB[i] < seqB[j] })
+	want := []uint64{0, 1, 2, 3, 4}
+	for i := range want {
+		if i >= len(seqA) || seqA[i] != want[i] {
+			t.Fatalf("sender A sequences: got %v want %v", seqA, want)
+		}
+		if i >= len(seqB) || seqB[i] != want[i] {
+			t.Fatalf("sender B sequences: got %v want %v", seqB, want)
+		}
+	}
+}
+
+func TestConcurrentClaimsSameSender(t *testing.T) {
+	s := testDB(t)
+	ctx := context.Background()
+	sender := "0xconcurrentSame"
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	ids := make(map[string]struct{})
+	for i := range 5 {
+		rec := testTxn(sender, store.StatusQueued)
+		rec.ID = uuid.New().String()
+		ids[rec.ID] = struct{}{}
+		rec.CreatedAt = now.Add(time.Duration(i) * time.Millisecond)
+		rec.UpdatedAt = rec.CreatedAt
+		if err := s.Create(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var mu sync.Mutex
+	var claimed []*store.TransactionRecord
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, err := s.ClaimNextQueuedForSender(ctx, sender)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if c == nil {
+				t.Error("nil claim")
+				return
+			}
+			mu.Lock()
+			claimed = append(claimed, c)
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if len(claimed) != 5 {
+		t.Fatalf("claimed count %d", len(claimed))
+	}
+	seenID := make(map[string]struct{})
+	var seqs []uint64
+	for _, c := range claimed {
+		if _, ok := ids[c.ID]; !ok {
+			t.Fatalf("unknown id %s", c.ID)
+		}
+		if _, dup := seenID[c.ID]; dup {
+			t.Fatalf("duplicate id %s", c.ID)
+		}
+		seenID[c.ID] = struct{}{}
+		if c.SequenceNumber == nil {
+			t.Fatal("nil sequence")
+		}
+		seqs = append(seqs, *c.SequenceNumber)
+	}
+	sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
+	for i, want := range []uint64{0, 1, 2, 3, 4} {
+		if i >= len(seqs) || seqs[i] != want {
+			t.Fatalf("sequences: got %v", seqs)
+		}
+	}
+}
+
+func TestWebhookOutboxFullFlow(t *testing.T) {
+	s := testDB(t)
+	ctx := context.Background()
+	txnID := uuid.New().String()
+	rec := testTxn("0xwhfull", store.StatusQueued)
+	rec.ID = txnID
+	if err := s.Create(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().UTC().Add(-time.Minute)
+	ds := make([]*webhook.DeliveryRecord, 3)
+	for i := range ds {
+		d := &webhook.DeliveryRecord{
+			ID:            uuid.New().String(),
+			TransactionID: txnID,
+			URL:           "https://example.com/h",
+			Payload:       "{}",
+			Status:        "pending",
+			NextRetryAt:   past.Add(time.Duration(i) * time.Millisecond),
+			CreatedAt:     time.Now().UTC().Truncate(time.Millisecond),
+		}
+		if err := s.CreateDelivery(ctx, d); err != nil {
+			t.Fatal(err)
+		}
+		ds[i] = d
+	}
+	d1, d2, d3 := ds[0], ds[1], ds[2]
+	claimed, err := s.ClaimPendingDeliveries(ctx, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claimed) != 3 {
+		t.Fatalf("first claim len %d", len(claimed))
+	}
+	byID := make(map[string]*webhook.DeliveryRecord)
+	for _, d := range claimed {
+		if d.Status != "delivering" {
+			t.Fatalf("status %s", d.Status)
+		}
+		byID[d.ID] = d
+	}
+	first := byID[d1.ID]
+	first.Status = "delivered"
+	first.Attempts = 1
+	now := time.Now().UTC()
+	first.LastAttemptAt = &now
+	if err := s.UpdateDelivery(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	second := byID[d2.ID]
+	second.Status = "failed"
+	second.Attempts = 1
+	second.LastAttemptAt = &now
+	if err := s.UpdateDelivery(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	third := byID[d3.ID]
+	third.Status = "pending"
+	third.NextRetryAt = time.Now().UTC().Add(time.Hour)
+	if err := s.UpdateDelivery(ctx, third); err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.ClaimPendingDeliveries(ctx, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("second claim: %v", out)
+	}
+	list, err := s.ListByTransactionID(ctx, txnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 3 {
+		t.Fatalf("list len %d", len(list))
+	}
+	st := make(map[string]string)
+	for _, d := range list {
+		st[d.ID] = d.Status
+	}
+	if st[d1.ID] != "delivered" || st[d2.ID] != "failed" || st[d3.ID] != "pending" {
+		t.Fatalf("statuses %v", st)
+	}
+}
+
+func TestShiftAndRequeue(t *testing.T) {
+	s := testDB(t)
+	ctx := context.Background()
+	sender := "shift"
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	var ids []string
+	for i := range 5 {
+		rec := testTxn(sender, store.StatusQueued)
+		rec.ID = uuid.New().String()
+		ids = append(ids, rec.ID)
+		rec.CreatedAt = now.Add(time.Duration(i) * time.Millisecond)
+		rec.UpdatedAt = rec.CreatedAt
+		if err := s.Create(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seqByID := make(map[string]uint64)
+	for range 5 {
+		c, err := s.ClaimNextQueuedForSender(ctx, sender)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c == nil || c.SequenceNumber == nil {
+			t.Fatal("claim")
+		}
+		seqByID[c.ID] = *c.SequenceNumber
+	}
+	var failedID string
+	for id, seq := range seqByID {
+		if seq == 2 {
+			failedID = id
+			break
+		}
+	}
+	if failedID == "" {
+		t.Fatal("no seq 2")
+	}
+	failed, err := s.Get(ctx, failedID)
+	if err != nil || failed == nil {
+		t.Fatal(err)
+	}
+	failed.Status = store.StatusFailed
+	if err := s.Update(ctx, failed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ShiftSenderSequences(ctx, sender, 2); err != nil {
+		t.Fatal(err)
+	}
+	var requeued []string
+	for _, id := range ids {
+		if id == failedID {
+			continue
+		}
+		got, _ := s.Get(ctx, id)
+		if got != nil && got.Status == store.StatusQueued {
+			requeued = append(requeued, id)
+		}
+	}
+	if len(requeued) != 2 {
+		t.Fatalf("requeued %v", requeued)
+	}
+	var newSeqs []uint64
+	for range 2 {
+		c, err := s.ClaimNextQueuedForSender(ctx, sender)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c == nil || c.SequenceNumber == nil {
+			t.Fatal("re-claim")
+		}
+		newSeqs = append(newSeqs, *c.SequenceNumber)
+	}
+	sort.Slice(newSeqs, func(i, j int) bool { return newSeqs[i] < newSeqs[j] })
+	want := []uint64{3, 4}
+	for i := range want {
+		if i >= len(newSeqs) || newSeqs[i] != want[i] {
+			t.Fatalf("after shift re-claim sequences: got %v want %v", newSeqs, want)
+		}
+	}
+}
+
+func TestStaleRecoveryDoesNotAffectRecentProcessing(t *testing.T) {
+	s := testDB(t)
+	ctx := context.Background()
+	sender := "0xstaleRecent"
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	for i := range 2 {
+		rec := testTxn(sender, store.StatusQueued)
+		rec.ID = uuid.New().String()
+		rec.CreatedAt = now.Add(time.Duration(i) * time.Millisecond)
+		rec.UpdatedAt = rec.CreatedAt
+		if err := s.Create(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		c, err := s.ClaimNextQueuedForSender(ctx, sender)
+		if err != nil || c == nil {
+			t.Fatalf("claim: %+v err=%v", c, err)
+		}
+	}
+	n, err := s.RecoverStaleProcessing(ctx, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("rows affected %d", n)
+	}
+	list, err := s.ListByStatus(ctx, store.StatusProcessing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("processing count %d", len(list))
 	}
 }

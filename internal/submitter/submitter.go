@@ -56,10 +56,10 @@ func New(
 	logger *slog.Logger,
 ) *Submitter {
 	return &Submitter{
-		cfg:    cfg,
-		queue:  q,
-		client: client,
-		abi:    abi,
+		cfg:      cfg,
+		queue:    q,
+		client:   client,
+		abi:      abi,
 		signer:   signer,
 		pkCache:  pkCache,
 		notifier: notifier,
