@@ -79,7 +79,11 @@ func (s *MemoryStore) Update(_ context.Context, rec *TransactionRecord) error {
 	return nil
 }
 
-// UpdateIfStatus atomically updates the record only if its current status matches expectedStatus.
+// UpdateIfStatus atomically updates the record only if its current status
+// matches expectedStatus. Returns (false, nil) when the record does not exist
+// OR when it exists but has a different status — callers cannot distinguish the
+// two cases. This matches the MySQL implementation where the WHERE clause
+// filters on both id and status.
 func (s *MemoryStore) UpdateIfStatus(_ context.Context, rec *TransactionRecord, expected TxnStatus) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

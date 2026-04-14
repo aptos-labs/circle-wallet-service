@@ -182,6 +182,8 @@ func (s *Submitter) runSenderWorker(ctx context.Context, senderAddress string) {
 	}
 
 	wg.Wait()
+
+	s.sweepOrphanedProcessing(ctx, senderAddress)
 }
 
 func (s *Submitter) pipelineProducer(ctx context.Context, senderAddress string, out chan<- signedItem) {
@@ -433,6 +435,18 @@ func (s *Submitter) reconcileAndRequeue(ctx context.Context, rec *store.Transact
 		s.logger.Error("submitter: reconcile sequence", "id", rec.ID, "error", err)
 	}
 
+	// Re-queue all processing (claimed) records for this sender so they get
+	// fresh sequence numbers after the reconcile.
+	processing, lErr := s.queue.ListByStatus(ctx, store.StatusProcessing)
+	if lErr == nil {
+		for _, p := range processing {
+			if p.SenderAddress == rec.SenderAddress && p.ID != rec.ID {
+				s.requeueRecord(ctx, p)
+			}
+		}
+	}
+
+	hadSequence := rec.SequenceNumber != nil
 	rec.Status = store.StatusQueued
 	rec.SequenceNumber = nil
 	rec.AttemptCount++
@@ -440,6 +454,11 @@ func (s *Submitter) reconcileAndRequeue(ctx context.Context, rec *store.Transact
 	rec.UpdatedAt = time.Now().UTC()
 	if err := s.queue.Update(ctx, rec); err != nil {
 		s.logger.Error("submitter: requeue after reconcile", "id", rec.ID, "error", err)
+	}
+	if hadSequence {
+		if err := s.queue.ReleaseSequence(ctx, rec.SenderAddress); err != nil {
+			s.logger.Error("submitter: release sequence after reconcile", "id", rec.ID, "error", err)
+		}
 	}
 }
 
@@ -466,12 +485,32 @@ func (s *Submitter) drainPipeline(ctx context.Context, ch <-chan signedItem, sen
 	}
 }
 
+// sweepOrphanedProcessing requeues any records for this sender that are still
+// in "processing" after the worker exits. This handles the race where the
+// producer commits a claim after pipeCancel but before it checks ctx.Err().
+func (s *Submitter) sweepOrphanedProcessing(ctx context.Context, senderAddress string) {
+	records, err := s.queue.ListByStatus(ctx, store.StatusProcessing)
+	if err != nil {
+		s.logger.Error("submitter: sweep orphaned", "sender", senderAddress, "error", err)
+		return
+	}
+	for _, rec := range records {
+		if rec.SenderAddress != senderAddress {
+			continue
+		}
+		s.logger.Warn("submitter: sweeping orphaned processing record", "id", rec.ID, "sender", senderAddress)
+		s.requeueRecord(ctx, rec)
+	}
+}
+
 func isSequenceError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "SEQUENCE_NUMBER") || strings.Contains(msg, "sequence_number")
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "sequence_number") ||
+		strings.Contains(msg, "sequence number") ||
+		strings.Contains(msg, "invalid_sequence")
 }
 
 func (s *Submitter) retrySleep(ctx context.Context) {

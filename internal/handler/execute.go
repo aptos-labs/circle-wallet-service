@@ -35,7 +35,7 @@ type feePayerInfo struct {
 func Execute(cfg *config.Config, st store.Store, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req executeRequest
-		if err := decodeJSON(r, &req); err != nil {
+		if err := decodeJSON(w, r, &req); err != nil {
 			errorResponse(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 			return
 		}
@@ -109,10 +109,8 @@ func Execute(cfg *config.Config, st store.Store, logger *slog.Logger) http.Handl
 		}
 
 		qp := store.QueuedPayload{
-			TypeArguments:    req.TypeArguments,
-			Arguments:        req.Arguments,
-			FeePayerWalletID: feePayerWalletID,
-			FeePayerAddress:  feePayerAddress,
+			TypeArguments: req.TypeArguments,
+			Arguments:     req.Arguments,
 		}
 		payloadJSON, err := json.Marshal(qp)
 		if err != nil {

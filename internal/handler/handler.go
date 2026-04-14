@@ -29,8 +29,8 @@ func errorResponse(w http.ResponseWriter, status int, msg string) {
 
 const maxRequestBodySize = 1 << 20 // 1 MB
 
-func decodeJSON(r *http.Request, v any) error {
-	limited := http.MaxBytesReader(nil, r.Body, maxRequestBodySize)
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	limited := http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 	dec := json.NewDecoder(limited)
 	dec.DisallowUnknownFields()
 	return dec.Decode(v)

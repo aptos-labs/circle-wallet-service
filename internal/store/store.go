@@ -60,11 +60,10 @@ type TransactionRecord struct {
 }
 
 // QueuedPayload is stored in TransactionRecord.PayloadJSON for the worker to rebuild the entry function.
+// Fee-payer fields live on TransactionRecord directly and are not duplicated here.
 type QueuedPayload struct {
-	TypeArguments    []string `json:"type_arguments"`
-	Arguments        []any    `json:"arguments"`
-	FeePayerWalletID string   `json:"fee_payer_wallet_id,omitempty"`
-	FeePayerAddress  string   `json:"fee_payer_address,omitempty"`
+	TypeArguments []string `json:"type_arguments"`
+	Arguments     []any    `json:"arguments"`
 }
 
 // Store provides CRUD and query operations for transaction records.

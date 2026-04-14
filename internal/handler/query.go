@@ -17,7 +17,7 @@ type queryRequest struct {
 func Query(client *aptos.Client, abiCache *aptos.ABICache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req queryRequest
-		if err := decodeJSON(r, &req); err != nil {
+		if err := decodeJSON(w, r, &req); err != nil {
 			errorResponse(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 			return
 		}
@@ -62,8 +62,7 @@ func Query(client *aptos.Client, abiCache *aptos.ABICache) http.HandlerFunc {
 			typeArgs = []string{}
 		}
 
-		// Call view.
-		result, err := client.View(req.FunctionID, typeArgs, args)
+		result, err := client.View(r.Context(), req.FunctionID, typeArgs, args)
 		if err != nil {
 			errorResponse(w, http.StatusBadGateway, "view call failed: "+err.Error())
 			return

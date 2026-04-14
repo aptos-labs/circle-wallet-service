@@ -31,15 +31,24 @@ func ValidateWebhookURL(raw string) error {
 
 func isPrivateHost(host string) bool {
 	ip := net.ParseIP(host)
-	if ip == nil {
-		if strings.EqualFold(host, "localhost") {
+	if ip != nil {
+		return isPrivateIP(ip)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil || len(ips) == 0 {
+		return false
+	}
+	for _, resolved := range ips {
+		if isPrivateIP(resolved) {
 			return true
 		}
-		ips, err := net.LookupIP(host)
-		if err != nil || len(ips) == 0 {
-			return false
-		}
-		ip = ips[0]
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+	return false
+}
+
+func isPrivateIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }

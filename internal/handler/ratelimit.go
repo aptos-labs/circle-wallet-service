@@ -2,9 +2,7 @@ package handler
 
 import (
 	"encoding/json"
-	"math"
 	"net/http"
-	"strconv"
 
 	"golang.org/x/time/rate"
 )
@@ -45,14 +43,8 @@ func (rl *RateLimitMiddleware) Wrap(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		rsv := rl.global.Reserve()
-		if delay := rsv.Delay(); delay > 0 {
-			rsv.Cancel()
-			sec := int(math.Ceil(delay.Seconds()))
-			if sec < 1 {
-				sec = 1
-			}
-			w.Header().Set("Retry-After", strconv.Itoa(sec))
+		if !rl.global.Allow() {
+			w.Header().Set("Retry-After", "1")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate limit exceeded"})

@@ -63,7 +63,9 @@ func Migrate(mysqlDSN string) error {
 	return nil
 }
 
-// Open returns a sql.DB for the given DSN (adds parseTime and multiStatements if missing).
+// Open returns a sql.DB for the given DSN (adds parseTime if missing).
+// multiStatements is intentionally NOT enabled on the app pool to reduce
+// SQL injection attack surface; only Migrate enables it for schema DDL.
 func Open(mysqlDSN string) (*sql.DB, error) {
 	dsn := mysqlDSN
 	if !strings.Contains(dsn, "parseTime") {
@@ -71,13 +73,6 @@ func Open(mysqlDSN string) (*sql.DB, error) {
 			dsn += "&parseTime=true"
 		} else {
 			dsn += "?parseTime=true"
-		}
-	}
-	if !strings.Contains(dsn, "multiStatements") {
-		if strings.Contains(dsn, "?") {
-			dsn += "&multiStatements=true"
-		} else {
-			dsn += "?multiStatements=true"
 		}
 	}
 	db, err := sql.Open("mysql", dsn)
