@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"time"
 )
@@ -19,11 +20,35 @@ type Worker struct {
 }
 
 func NewWorker(ws WebhookStore, maxRetries int, timeout time.Duration, logger *slog.Logger) *Worker {
+	transport := &http.Transport{
+		DialContext: ssrfSafeDialer(timeout),
+	}
 	return &Worker{
 		store:      ws,
-		httpClient: &http.Client{Timeout: timeout},
+		httpClient: &http.Client{Timeout: timeout, Transport: transport},
 		maxRetries: maxRetries,
 		logger:     logger,
+	}
+}
+
+// ssrfSafeDialer returns a DialContext that rejects connections to private/loopback addresses.
+func ssrfSafeDialer(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: timeout}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("webhook: invalid address %q: %w", addr, err)
+		}
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("webhook: resolve %q: %w", host, err)
+		}
+		for _, ip := range ips {
+			if ip.IP.IsLoopback() || ip.IP.IsPrivate() || ip.IP.IsLinkLocalUnicast() || ip.IP.IsLinkLocalMulticast() {
+				return nil, fmt.Errorf("webhook: refusing to connect to private address %s", ip.IP)
+			}
+		}
+		return dialer.DialContext(ctx, network, addr)
 	}
 }
 

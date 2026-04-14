@@ -363,6 +363,7 @@ func (s *Submitter) markPermanentFailure(ctx context.Context, rec *store.Transac
 
 func (s *Submitter) requeueTransient(ctx context.Context, rec *store.TransactionRecord, err error) {
 	s.logger.Warn("submitter: retry", "id", rec.ID, "error", err)
+	hadSequence := rec.SequenceNumber != nil
 	rec.Status = store.StatusQueued
 	rec.SequenceNumber = nil
 	rec.AttemptCount++
@@ -371,14 +372,25 @@ func (s *Submitter) requeueTransient(ctx context.Context, rec *store.Transaction
 	if err2 := s.queue.Update(ctx, rec); err2 != nil {
 		s.logger.Error("submitter: requeue", "id", rec.ID, "error", err2)
 	}
+	if hadSequence {
+		if err2 := s.queue.ReleaseSequence(ctx, rec.SenderAddress); err2 != nil {
+			s.logger.Error("submitter: release sequence", "id", rec.ID, "error", err2)
+		}
+	}
 }
 
 func (s *Submitter) requeueRecord(ctx context.Context, rec *store.TransactionRecord) {
+	hadSequence := rec.SequenceNumber != nil
 	rec.Status = store.StatusQueued
 	rec.SequenceNumber = nil
 	rec.UpdatedAt = time.Now().UTC()
 	if err := s.queue.Update(ctx, rec); err != nil {
 		s.logger.Error("submitter: requeue on cancel", "id", rec.ID, "error", err)
+	}
+	if hadSequence {
+		if err := s.queue.ReleaseSequence(ctx, rec.SenderAddress); err != nil {
+			s.logger.Error("submitter: release sequence on cancel", "id", rec.ID, "error", err)
+		}
 	}
 }
 
@@ -398,7 +410,7 @@ func (s *Submitter) reconcileAndRequeue(ctx context.Context, rec *store.Transact
 		return
 	}
 
-	if err := s.queue.UpsertNextSequence(ctx, rec.SenderAddress, chainSeq); err != nil {
+	if err := s.queue.ReconcileSequence(ctx, rec.SenderAddress, chainSeq); err != nil {
 		s.logger.Error("submitter: reconcile sequence", "id", rec.ID, "error", err)
 	}
 
@@ -430,8 +442,8 @@ func (s *Submitter) drainPipeline(ctx context.Context, ch <-chan signedItem, sen
 		s.logger.Error("submitter: drain parse chain seq", "sender", senderAddress, "error", err)
 		return
 	}
-	if err := s.queue.UpsertNextSequence(ctx, senderAddress, chainSeq); err != nil {
-		s.logger.Error("submitter: drain reset sequence", "sender", senderAddress, "error", err)
+	if err := s.queue.ReconcileSequence(ctx, senderAddress, chainSeq); err != nil {
+		s.logger.Error("submitter: drain reconcile sequence", "sender", senderAddress, "error", err)
 	}
 }
 

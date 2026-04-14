@@ -57,10 +57,17 @@ func Execute(cfg *config.Config, st store.Store, logger *slog.Logger) http.Handl
 			}
 		}
 
-		if req.WalletID == "" {
-			errorResponse(w, http.StatusBadRequest, "wallet_id is required")
+	if req.WebhookURL != "" {
+		if err := ValidateWebhookURL(req.WebhookURL); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
 			return
 		}
+	}
+
+	if req.WalletID == "" {
+		errorResponse(w, http.StatusBadRequest, "wallet_id is required")
+		return
+	}
 		if req.Address == "" {
 			errorResponse(w, http.StatusBadRequest, "address is required")
 			return

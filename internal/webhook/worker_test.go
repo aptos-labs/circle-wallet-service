@@ -12,6 +12,13 @@ import (
 	"time"
 )
 
+// newTestWorker creates a Worker with a plain HTTP client (no SSRF dialer) for httptest usage.
+func newTestWorker(ws WebhookStore, maxRetries int, timeout time.Duration, logger *slog.Logger) *Worker {
+	w := NewWorker(ws, maxRetries, timeout, logger)
+	w.httpClient = &http.Client{Timeout: timeout}
+	return w
+}
+
 type mockWorkerStore struct {
 	mu        sync.Mutex
 	claim     []*DeliveryRecord
@@ -61,7 +68,7 @@ func TestDeliverSuccess(t *testing.T) {
 		CreatedAt:     time.Now().UTC(),
 	}
 	ms := &mockWorkerStore{}
-	w := NewWorker(ms, 5, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := newTestWorker(ms, 5, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	w.deliver(context.Background(), rec)
 
 	ms.mu.Lock()
@@ -95,7 +102,7 @@ func TestDeliver4xx(t *testing.T) {
 		CreatedAt:     time.Now().UTC(),
 	}
 	ms := &mockWorkerStore{}
-	w := NewWorker(ms, 5, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := newTestWorker(ms, 5, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	w.deliver(context.Background(), rec)
 
 	ms.mu.Lock()
@@ -131,7 +138,7 @@ func TestDeliver5xxRetry(t *testing.T) {
 		CreatedAt:     before,
 	}
 	ms := &mockWorkerStore{}
-	w := NewWorker(ms, 10, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := newTestWorker(ms, 10, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	w.deliver(context.Background(), rec)
 
 	ms.mu.Lock()
@@ -169,7 +176,7 @@ func TestDeliverMaxRetriesExhausted(t *testing.T) {
 		CreatedAt:     time.Now().UTC(),
 	}
 	ms := &mockWorkerStore{}
-	w := NewWorker(ms, 3, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := newTestWorker(ms, 3, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	w.deliver(context.Background(), rec)
 
 	ms.mu.Lock()
@@ -209,7 +216,7 @@ func TestProcessBatch(t *testing.T) {
 			{ID: "a3", TransactionID: "t3", URL: retrySrv.URL, Payload: `{}`, Status: "pending", NextRetryAt: now, CreatedAt: now},
 		},
 	}
-	w := NewWorker(ms, 10, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := newTestWorker(ms, 10, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	w.processBatch(context.Background())
 
 	ms.mu.Lock()
@@ -244,7 +251,7 @@ func TestUpdateDeliveryErrorStillAttemptsDeliver(t *testing.T) {
 		Status: "pending", NextRetryAt: now, CreatedAt: now,
 	}
 	ms := &mockWorkerStore{updateErr: errors.New("db write failed")}
-	w := NewWorker(ms, 5, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := newTestWorker(ms, 5, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	w.deliver(context.Background(), rec)
 	ms.mu.Lock()
 	n := len(ms.updates)
@@ -257,7 +264,7 @@ func TestUpdateDeliveryErrorStillAttemptsDeliver(t *testing.T) {
 func TestWorkerConcurrency(t *testing.T) {
 	t.Parallel()
 	ms := &mockWorkerStore{claim: nil}
-	w := NewWorker(ms, 5, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := newTestWorker(ms, 5, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	done := make(chan struct{})
@@ -285,7 +292,7 @@ func TestDeliverNetworkError(t *testing.T) {
 		CreatedAt:     time.Now().UTC(),
 	}
 	ms := &mockWorkerStore{}
-	w := NewWorker(ms, 5, 2*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := newTestWorker(ms, 5, 2*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	before := time.Now().UTC()
 	w.deliver(context.Background(), rec)
 
