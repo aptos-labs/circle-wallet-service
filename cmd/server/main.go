@@ -1,3 +1,23 @@
+// Command server is the HTTP entrypoint for the wallet service.
+//
+// It wires together the four long-lived goroutines that make up the runtime:
+//
+//   - Submitter  — per-sender workers that claim queued rows, sign via Circle,
+//     and submit to the Aptos node. See internal/submitter.
+//   - Poller     — confirms submitted transactions by hash and flips terminal
+//     statuses. See internal/poller.
+//   - Webhook    — delivery worker that drains the webhook outbox.
+//   - HTTP server — handles /v1/execute, /v1/query, /v1/transactions/{id},
+//     /v1/health.
+//
+// Startup sequence: load config → run DB migrations → open MySQL → construct
+// clients (Circle, Aptos), allowing each to be absent so the server can still
+// serve /v1/health and return 503 on the affected endpoints → start background
+// goroutines → start HTTP server. Shutdown is driven by SIGINT/SIGTERM through
+// a cancelled context; the HTTP server gets a bounded graceful shutdown.
+//
+// See TRANSACTION_PIPELINE.md for a full description of how a request flows
+// from /v1/execute to an on-chain transaction.
 package main
 
 import (
@@ -33,12 +53,18 @@ func main() {
 	}
 }
 
+// run is the real entrypoint. It's split out of main so tests can invoke the
+// wiring logic without touching os.Exit / os.Stdout, and so any error here
+// flows through main's structured logger.
 func run(logger *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	// Migrations run before opening the pooled connection so that schema errors
+	// surface during startup rather than on the first request. The migration
+	// driver opens its own short-lived connection.
 	if err := db.Migrate(cfg.MySQLDSN()); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
@@ -52,6 +78,9 @@ func run(logger *slog.Logger) error {
 	}()
 
 	memStore := mysql.New(sqlDB)
+	defer func() {
+		_ = memStore.Close()
+	}()
 
 	logger.Info("config loaded",
 		"port", cfg.ServerPort(),
@@ -59,6 +88,10 @@ func run(logger *slog.Logger) error {
 		"testing_mode", cfg.TestingMode(),
 	)
 
+	// Circle and Aptos clients are optional. If either set of credentials is
+	// missing, the server still starts but the affected endpoints return 503.
+	// This lets /v1/health and /v1/query (the latter only needs Aptos) work in
+	// environments where Circle isn't configured, e.g. local read-only testing.
 	var circleClient *circle2.Client
 	var circleSigner *circle2.Signer
 	if cfg.CircleAPIKey() != "" && cfg.CircleEntitySecret() != "" {
@@ -94,14 +127,24 @@ func run(logger *slog.Logger) error {
 		logger,
 	)
 
+	// A single cancellable context drives shutdown of every background goroutine.
+	// SIGINT/SIGTERM cancels the context; each loop (submitter, poller, webhook,
+	// HTTP server goroutine) observes ctx.Done() and exits. The HTTP server itself
+	// is shut down with a bounded timeout below so that in-flight requests get a
+	// chance to finish before the process exits.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// Submitter requires the full triple (Aptos client, Circle signer, ABI cache).
+	// Without any one of them, /v1/execute would have nothing to sign or submit,
+	// so we skip spawning the worker entirely rather than have it loop over errors.
 	if aptosClient != nil && circleSigner != nil && abiCache != nil {
 		sub := submitter.New(cfg, memStore, aptosClient, abiCache, circleSigner, pubkeyCache, notifier, logger)
 		go sub.Run(ctx)
 	}
 
+	// Poller only needs the Aptos client — it confirms already-submitted txns by
+	// hash and doesn't sign anything. Safe to run even when Circle is absent.
 	if aptosClient != nil {
 		txnPoller := poller.New(aptosClient, memStore, notifier, time.Duration(cfg.PollIntervalSeconds())*time.Second, logger)
 		go txnPoller.Run(ctx)
@@ -144,6 +187,10 @@ func run(logger *slog.Logger) error {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
+	// Middleware chain is applied in reverse order of wrapping: outermost (auth)
+	// runs first, then rate limit, then the mux. Auth is wrapped last so the
+	// health check bypass below can route directly to mux without touching
+	// either middleware.
 	var inner http.Handler = mux
 	if cfg.RateLimitEnabled() {
 		rl := handler2.NewRateLimitMiddleware(handler2.RateLimiterConfig{
@@ -155,7 +202,13 @@ func run(logger *slog.Logger) error {
 		inner = rl.Wrap(inner)
 	}
 
-	var h http.Handler = inner
+	// API-key auth is disabled in testing mode so the test suite doesn't need to
+	// thread credentials through every request. In all other modes, every
+	// endpoint except /v1/health requires a bearer token (or X-API-Key header)
+	// matching cfg.APIKey(). Compared with subtle.ConstantTimeCompare to avoid
+	// timing side channels. /v1/health bypasses auth so orchestrators can probe
+	// liveness without a secret.
+	h := inner
 	if !cfg.TestingMode() {
 		apiKeyBytes := []byte(cfg.APIKey())
 		authedInner := inner
@@ -198,6 +251,10 @@ func run(logger *slog.Logger) error {
 	<-ctx.Done()
 	logger.Info("shutting down...")
 
+	// Graceful HTTP shutdown: new connections are rejected, in-flight requests
+	// have up to 10s to finish. Background goroutines (submitter, poller,
+	// webhook) are already draining via the cancelled ctx. A fresh
+	// context.Background() is used here because ctx itself is already cancelled.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
@@ -208,6 +265,9 @@ func run(logger *slog.Logger) error {
 	return nil
 }
 
+// extractBearerToken pulls the token from an "Authorization: Bearer <token>"
+// header. If the header doesn't use the Bearer scheme it's returned as-is,
+// which lets X-API-Key (raw token) work through the same code path.
 func extractBearerToken(header string) string {
 	const prefix = "Bearer "
 	if len(header) >= len(prefix) && strings.EqualFold(header[:len(prefix)], prefix) {

@@ -133,8 +133,8 @@ func serializeU128(value any) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("u128: %w", err)
 	}
-	max := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
-	if n.Sign() < 0 || n.Cmp(max) > 0 {
+	maximum := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
+	if n.Sign() < 0 || n.Cmp(maximum) > 0 {
 		return nil, fmt.Errorf("u128: value out of range")
 	}
 	return bcs.SerializeSingle(func(ser *bcs.Serializer) { ser.U128(*n) })
@@ -145,8 +145,8 @@ func serializeU256(value any) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("u256: %w", err)
 	}
-	max := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
-	if n.Sign() < 0 || n.Cmp(max) > 0 {
+	maximum := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+	if n.Sign() < 0 || n.Cmp(maximum) > 0 {
 		return nil, fmt.Errorf("u256: value out of range")
 	}
 	return bcs.SerializeSingle(func(ser *bcs.Serializer) { ser.U256(*n) })

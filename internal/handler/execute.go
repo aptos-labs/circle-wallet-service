@@ -14,6 +14,17 @@ import (
 	"github.com/google/uuid"
 )
 
+// executeRequest is the JSON body accepted by POST /v1/execute.
+//
+// FunctionID is the fully-qualified Move entry function, e.g.
+// "0x1::coin::transfer". TypeArguments and Arguments are passed through to the
+// ABI decoder and serialized at submit time, not at enqueue time.
+//
+// IdempotencyKey (or the "Idempotency-Key" request header) lets a client retry
+// a request without creating a duplicate transaction. See Execute for the
+// replay semantics.
+//
+// FeePayer is optional; when absent the sender pays its own gas.
 type executeRequest struct {
 	WalletID       string        `json:"wallet_id"`
 	Address        string        `json:"address"`
@@ -26,12 +37,29 @@ type executeRequest struct {
 	FeePayer       *feePayerInfo `json:"fee_payer,omitempty"`
 }
 
+// feePayerInfo identifies a Circle wallet that pays gas on behalf of the
+// sender. The service signs once as the sender and once as the fee payer and
+// assembles a fee-payer transaction (see internal/submitter.prepareRecord).
 type feePayerInfo struct {
 	WalletID string `json:"wallet_id"`
 	Address  string `json:"address"`
 }
 
-// Execute handles POST /v1/execute — enqueues a transaction for the background submitter.
+// Execute handles POST /v1/execute — enqueues a transaction for the background
+// submitter and returns 202 immediately.
+//
+// This handler does no blockchain work: no signing, no ABI lookup, no sequence
+// number allocation. It only validates the request and writes a row to the
+// transactions table with status="queued" and sequence_number=NULL. The
+// submitter claims the row asynchronously and assigns a sequence number at
+// that point; see TRANSACTION_PIPELINE.md for the full flow.
+//
+// Idempotency: if the request carries an Idempotency-Key (body field or
+// header) and a row with that key already exists, the prior response is
+// replayed with the "X-Idempotency-Replayed: true" header and no new row is
+// created. A race where two concurrent requests carry the same key is resolved
+// by the unique index on idempotency_key: the loser gets ErrIdempotencyConflict
+// from the store and falls into the same replay path.
 func Execute(cfg *config.Config, st store.Store, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req executeRequest
@@ -40,10 +68,16 @@ func Execute(cfg *config.Config, st store.Store, logger *slog.Logger) http.Handl
 			return
 		}
 
+		// Body field takes precedence over the header so clients that only
+		// control the body (e.g. SDK users behind a proxy that strips headers)
+		// can still get idempotent behavior.
 		idempKey := req.IdempotencyKey
 		if idempKey == "" {
 			idempKey = r.Header.Get("Idempotency-Key")
 		}
+		// First idempotency check: cheap lookup before we do any other work.
+		// If this misses, a second check happens after Create returns
+		// ErrIdempotencyConflict (the race path).
 		if idempKey != "" {
 			if existing, err := st.GetByIdempotencyKey(r.Context(), idempKey); err != nil {
 				errorResponse(w, http.StatusInternalServerError, "failed to check idempotency")
@@ -82,6 +116,10 @@ func Execute(cfg *config.Config, st store.Store, logger *slog.Logger) http.Handl
 			return
 		}
 
+		// Canonicalize the sender address to long-form hex so queries against
+		// transactions.sender_address (e.g. ListQueuedSenders, ClaimNext...) are
+		// consistent. Without this, "0x1" and "0x000...001" would look like two
+		// different senders and each get their own worker + sequence counter.
 		senderAddr, err := aptos.ParseAddress(req.Address)
 		if err != nil {
 			errorResponse(w, http.StatusBadRequest, "invalid address: "+err.Error())
@@ -118,6 +156,13 @@ func Execute(cfg *config.Config, st store.Store, logger *slog.Logger) http.Handl
 			return
 		}
 
+		// created_at is assigned by the application (not MySQL's CURRENT_TIMESTAMP)
+		// because it's the primary ordering key for the per-sender FIFO queue —
+		// see the ORDER BY in ClaimNextQueuedForSender. Using the app clock keeps
+		// the timestamp in the same timezone across rows and lets tests inject
+		// deterministic times without stubbing MySQL.
+		// sequence_number is intentionally left zero/unset: the submitter
+		// allocates it atomically when it claims the row.
 		now := time.Now().UTC()
 		rec := &store.TransactionRecord{
 			ID:               uuid.New().String(),
@@ -136,6 +181,11 @@ func Execute(cfg *config.Config, st store.Store, logger *slog.Logger) http.Handl
 			ExpiresAt:        now.Add(time.Duration(cfg.TxnExpirationSeconds()) * time.Second),
 		}
 
+		// Second idempotency check (race path): two concurrent requests with the
+		// same key both pass the initial lookup, then one of them loses to the
+		// UNIQUE constraint on uk_idempotency. The loser converts the conflict
+		// into a replay of the winner's record so both clients see identical
+		// responses.
 		if err := st.Create(r.Context(), rec); err != nil {
 			if errors.Is(err, store.ErrIdempotencyConflict) {
 				existing, gerr := st.GetByIdempotencyKey(r.Context(), idempKey)

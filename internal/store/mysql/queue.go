@@ -10,7 +10,13 @@ import (
 	"github.com/aptos-labs/jc-contract-integration/internal/store"
 )
 
-// ListQueuedSenders implements store.Queue.
+// ListQueuedSenders returns the distinct sender addresses that currently have
+// at least one queued transaction, oldest-waiting-sender first.
+//
+// The dispatcher calls this each tick to know which per-sender workers to
+// spawn. Ordering by MIN(created_at) gives rough fairness when the dispatcher
+// is catching up from a backlog — the sender whose oldest queued txn is oldest
+// gets served first.
 func (s *Store) ListQueuedSenders(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT sender_address FROM transactions
@@ -34,7 +40,27 @@ func (s *Store) ListQueuedSenders(ctx context.Context) ([]string, error) {
 	return senders, rows.Err()
 }
 
-// ClaimNextQueuedForSender implements store.Queue.
+// ClaimNextQueuedForSender atomically claims the oldest queued transaction for
+// the given sender and allocates it the next sequence number.
+//
+// The entire operation runs in a single MySQL transaction:
+//
+//  1. SELECT … FOR UPDATE picks the oldest queued row (by created_at, id) and
+//     locks it so no other worker can double-claim.
+//  2. SELECT next_sequence FROM account_sequences FOR UPDATE locks the per-sender
+//     counter row (or creates it at 0 on first use).
+//  3. The counter is incremented.
+//  4. The transaction row is flipped to status=processing with the allocated
+//     sequence_number.
+//
+// Returns (nil, nil) if no queued rows exist for this sender.
+//
+// Invariant: every row in status=processing or status=submitted has a
+// sequence_number equal to the value of account_sequences.next_sequence at the
+// moment it was claimed. The counter is monotonically non-decreasing under
+// normal operation; failure paths (ReleaseSequence, ShiftSenderSequences,
+// RecoverStaleProcessing) decrement it to close gaps when rows go back to
+// queued without having been submitted.
 func (s *Store) ClaimNextQueuedForSender(ctx context.Context, senderAddress string) (*store.TransactionRecord, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -110,7 +136,14 @@ func (s *Store) ClaimNextQueuedForSender(ctx context.Context, senderAddress stri
 	return rec, nil
 }
 
-// ReconcileSequence implements store.Queue.
+// ReconcileSequence raises the per-sender counter to the given on-chain
+// sequence if the counter has fallen behind.
+//
+// Called when the Aptos node returns a sequence-number error or when the
+// pipeline drains after a failure. GREATEST is deliberately one-directional
+// up: we never lower the counter based on chain state, because txns we just
+// submitted may not yet be indexed on the node we're querying, and lowering
+// would cause a duplicate-sequence conflict on the next submit.
 func (s *Store) ReconcileSequence(ctx context.Context, senderAddress string, chainSeq uint64) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE account_sequences SET next_sequence = GREATEST(next_sequence, ?), updated_at = UTC_TIMESTAMP(3)
@@ -118,8 +151,20 @@ func (s *Store) ReconcileSequence(ctx context.Context, senderAddress string, cha
 	return err
 }
 
-// RecoverStaleProcessing resets rows stuck in processing (e.g. worker crash) back to queued.
-// It also decrements the sequence counter for each affected sender to avoid gaps.
+// RecoverStaleProcessing resets rows stuck in processing (e.g. worker crash)
+// back to queued. It also decrements the sequence counter for each affected
+// sender to avoid gaps.
+//
+// Called periodically by submitter.recoverLoop. A row is considered stale if
+// its updated_at is older than olderThan — long enough that a healthy worker
+// would have moved it forward by now. The threshold has to be long enough to
+// survive a slow Circle signing round-trip but short enough that a crashed
+// worker's work becomes available to the next dispatcher tick within a
+// reasonable window.
+//
+// The counter decrement is bounded at zero (GREATEST(… - ?, 0)) to survive the
+// pathological case where the counter has already been reconciled with chain
+// state that's lower than the recovered count.
 func (s *Store) RecoverStaleProcessing(ctx context.Context, olderThan time.Duration) (int64, error) {
 	sec := int64(olderThan / time.Second)
 	if sec < 1 {
@@ -147,12 +192,14 @@ func (s *Store) RecoverStaleProcessing(ctx context.Context, olderThan time.Durat
 	if err != nil {
 		return 0, err
 	}
+	defer func() {
+		_ = rows.Close()
+	}()
 	senderCounts := make(map[string]int64)
 	for rows.Next() {
 		var addr string
 		var cnt int64
 		if err := rows.Scan(&addr, &cnt); err != nil {
-			_ = rows.Close()
 			return 0, err
 		}
 		senderCounts[addr] = cnt
@@ -237,8 +284,14 @@ func (s *Store) ShiftSenderSequences(ctx context.Context, senderAddress string, 
 	return nil
 }
 
-// ReleaseSequence decrements the sequence counter for a sender by 1,
-// used when a claimed transaction is requeued before submission.
+// ReleaseSequence decrements the sequence counter for a sender by 1.
+//
+// Called when a claimed transaction is requeued before submission — e.g. on
+// transient signing failure in submitter.requeueTransient. The caller must
+// have already cleared the transaction row's sequence_number; this function
+// only touches the counter.
+//
+// Bounded at zero to survive double-releases or sequence-reconcile races.
 func (s *Store) ReleaseSequence(ctx context.Context, senderAddress string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE account_sequences SET next_sequence = GREATEST(next_sequence - 1, 0), updated_at = UTC_TIMESTAMP(3)

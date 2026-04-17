@@ -40,10 +40,18 @@ type Notifier interface {
 	Notify(ctx context.Context, rec *store.TransactionRecord)
 }
 
+// transactionSubmitter is the minimal slice of aptos.Client the consumer loop
+// depends on. Factored out so tests can inject a mock node without spinning up
+// the real HTTP client.
 type transactionSubmitter interface {
 	SubmitTransaction(signed *aptossdk.SignedTransaction) (*api.SubmitTransactionResponse, error)
 }
 
+// signedItem is the unit of work passed from the signing producer to the
+// submitting consumer. It carries the original DB row (for status updates),
+// the fully signed transaction ready to POST, and the sequence number the
+// signing pipeline used — kept on the item so we can log it even after the
+// row's SequenceNumber field is cleared on failure.
 type signedItem struct {
 	rec       *store.TransactionRecord
 	signedTxn *aptossdk.SignedTransaction
@@ -51,6 +59,10 @@ type signedItem struct {
 }
 
 // Submitter is the top-level dispatcher that owns per-sender workers.
+//
+// The "one worker per sender address" invariant lives in Submitter.Run via the
+// workers map; every per-sender correctness property (FIFO order, sequence
+// allocation monotonicity, ShiftSenderSequences) depends on this.
 type Submitter struct {
 	cfg      *config.Config
 	queue    store.Queue
@@ -86,6 +98,17 @@ func New(
 }
 
 // Run starts the dispatcher loop. It blocks until ctx is cancelled.
+//
+// Each tick, ListQueuedSenders returns every sender with outstanding queued
+// work. For any sender that doesn't already have a live worker, a new
+// runSenderWorker goroutine is spawned with a cancellable child context. The
+// workers map doubles as a "is a worker already running for this sender"
+// registry — this is how the single-worker-per-sender invariant is enforced.
+//
+// On shutdown (ctx cancelled), every worker's context is cancelled so they
+// drain in-flight work and exit; Run itself returns immediately without
+// waiting for them. Callers that need to wait for clean drain should close
+// sqlDB only after all referenced goroutines have observed ctx.Done().
 func (s *Submitter) Run(ctx context.Context) {
 	go s.recoverLoop(ctx)
 
@@ -112,6 +135,10 @@ func (s *Submitter) Run(ctx context.Context) {
 			}
 			mu.Lock()
 			for _, sender := range senders {
+				// Skip senders that already have a live worker. The worker's
+				// deferred delete(workers, addr) below clears this entry when
+				// the worker exits (queue drained or failure), at which point
+				// a subsequent tick will spawn a fresh one if new work appears.
 				if _, running := workers[sender]; running {
 					continue
 				}
@@ -129,6 +156,11 @@ func (s *Submitter) Run(ctx context.Context) {
 	}
 }
 
+// recoverLoop periodically rescues transactions stuck in "processing" past the
+// stale threshold. A row can end up stranded if a worker was killed (SIGKILL,
+// OOM, node failure) between claiming the row and either submitting or
+// requeuing it. RecoverStaleProcessing flips them back to queued and
+// decrements the sequence counter to keep allocation contiguous.
 func (s *Submitter) recoverLoop(ctx context.Context) {
 	t := time.NewTicker(time.Duration(s.cfg.SubmitterRecoveryTickSeconds()) * time.Second)
 	defer t.Stop()
@@ -150,12 +182,29 @@ func (s *Submitter) recoverLoop(ctx context.Context) {
 	}
 }
 
+// runSenderWorker runs the per-sender signing-and-submission pipeline.
+//
+// The producer (pipelineProducer) claims rows one at a time, signs them via
+// Circle, and pushes fully-signed transactions onto the buffered channel. The
+// consumer (this function's for-range loop) drains the channel and submits
+// each one. This overlaps Circle signing latency with Aptos submission
+// latency — the pipeline-depth knob controls how many sign-ahead transactions
+// can be in flight.
+//
+// On any submit failure we pipeCancel the producer (so it stops claiming more
+// work and creating more processing-state rows), drain whatever's left in the
+// channel, and sweep any stray processing rows the producer may have committed
+// in the race window. This keeps the DB state clean for the next dispatcher
+// tick, which will spawn a fresh worker with a fresh pipeline.
 func (s *Submitter) runSenderWorker(ctx context.Context, senderAddress string) {
 	depth := s.cfg.SubmitterSigningPipelineDepth()
 	if depth < 1 {
 		depth = 1
 	}
 
+	// A buffered channel of depth N gives us N-deep sign-ahead: the producer
+	// blocks when N signed transactions are waiting to be submitted, providing
+	// natural back-pressure when Aptos is slow.
 	pipeline := make(chan signedItem, depth)
 	pipeCtx, pipeCancel := context.WithCancel(ctx)
 	defer pipeCancel()
@@ -186,6 +235,15 @@ func (s *Submitter) runSenderWorker(ctx context.Context, senderAddress string) {
 	s.sweepOrphanedProcessing(ctx, senderAddress)
 }
 
+// pipelineProducer is the signing half of the per-sender pipeline. It loops
+// claiming queued rows, preparing+signing them, and pushing them onto the
+// output channel. Returns when:
+//   - ctx is cancelled (worker shutting down, or submit failure triggered pipeCancel),
+//   - ClaimNextQueuedForSender returns (nil, nil) — no more queued work,
+//   - the channel send blocks and ctx is cancelled mid-send.
+//
+// On the last case, the pre-signed record is requeued and its sequence number
+// released so it can be re-allocated by the next worker invocation.
 func (s *Submitter) pipelineProducer(ctx context.Context, senderAddress string, out chan<- signedItem) {
 	for {
 		if ctx.Err() != nil {
@@ -224,6 +282,21 @@ func (s *Submitter) pipelineProducer(ctx context.Context, senderAddress string, 
 
 // prepareRecord builds and signs a transaction. Returns (item, false) on
 // success, (nil, false) on permanent failure, (nil, true) on transient failure.
+//
+// Work performed, in order:
+//  1. Expiration and max-retry-duration checks — cheap; fail fast if the row
+//     has aged out before we spend on Circle signing.
+//  2. Resolve the sender's Circle wallet public key (cached).
+//  3. Decode the payload JSON and build a Move entry-function payload via the
+//     ABI cache.
+//  4. Construct a fee-payer RawTransaction at the row's allocated sequence.
+//  5. Call Circle to sign as the sender; if a separate fee payer is set, sign
+//     again as the fee payer.
+//  6. Assemble the FeePayerSignedTransaction.
+//
+// Any step that fails with a network/service error is classified transient
+// and triggers a requeue + ReleaseSequence. Validation or wallet errors are
+// permanent and trigger ShiftSenderSequences + webhook notify.
 func (s *Submitter) prepareRecord(ctx context.Context, rec *store.TransactionRecord) (*signedItem, bool) {
 	now := time.Now().UTC()
 
@@ -329,6 +402,16 @@ func (s *Submitter) prepareRecord(ctx context.Context, rec *store.TransactionRec
 	return &signedItem{rec: rec, signedTxn: signedTxn, seqNum: useSeq}, false
 }
 
+// submitSigned POSTs a signed transaction to the Aptos node and updates the DB
+// row to status=submitted on success. Returns true on success (continue the
+// pipeline), false on any failure (caller cancels the pipeline and drains).
+//
+// Three failure modes are distinguished:
+//   - Sequence mismatch (detected by isSequenceError) → reconcileAndRequeue:
+//     fetch chain's current sequence, bump the counter, requeue this record
+//     and any processing siblings so they can be re-signed.
+//   - Aged-out error (past max_retry_duration) → permanent failure.
+//   - Anything else → transient; requeue and try again on the next tick.
 func (s *Submitter) submitSigned(ctx context.Context, item *signedItem) bool {
 	sub := s.txSubmit
 	if sub == nil {
@@ -367,6 +450,12 @@ func (s *Submitter) submitSigned(ctx context.Context, item *signedItem) bool {
 	return true
 }
 
+// markPermanentFailure terminates a transaction with status=failed and fires
+// a webhook. Because this record held a sequence number that will never be
+// used on chain, ShiftSenderSequences slides every higher-numbered sibling
+// back to queued so they'll be re-claimed with fresh sequences — this
+// prevents a permanent gap in the per-sender sequence stream that would block
+// every subsequent submit for that account.
 func (s *Submitter) markPermanentFailure(ctx context.Context, rec *store.TransactionRecord, msg string) {
 	rec.Status = store.StatusFailed
 	rec.ErrorMessage = msg
@@ -382,6 +471,14 @@ func (s *Submitter) markPermanentFailure(ctx context.Context, rec *store.Transac
 	s.notifier.Notify(ctx, rec)
 }
 
+// requeueTransient puts a record back in queued state after a recoverable
+// failure (signing blip, submit network error). Clears the allocated sequence
+// number and, if we had claimed one, releases the counter by 1 so the next
+// claim reuses that slot instead of creating a gap.
+//
+// attempt_count is incremented for observability; there's no attempt cap here
+// — the wall-clock max_retry_duration check in prepareRecord / submitSigned
+// is what caps retries.
 func (s *Submitter) requeueTransient(ctx context.Context, rec *store.TransactionRecord, err error) {
 	s.logger.Warn("submitter: retry", "id", rec.ID, "error", err)
 	hadSequence := rec.SequenceNumber != nil
@@ -400,6 +497,10 @@ func (s *Submitter) requeueTransient(ctx context.Context, rec *store.Transaction
 	}
 }
 
+// requeueRecord puts a record back in queued without bumping attempt_count.
+// Used for "orderly give-backs" — pipeline drain on shutdown, or sweeping
+// orphaned processing rows — where no real attempt was made, so counting it
+// as a retry would inflate the attempt metric misleadingly.
 func (s *Submitter) requeueRecord(ctx context.Context, rec *store.TransactionRecord) {
 	hadSequence := rec.SequenceNumber != nil
 	rec.Status = store.StatusQueued
@@ -415,6 +516,21 @@ func (s *Submitter) requeueRecord(ctx context.Context, rec *store.TransactionRec
 	}
 }
 
+// reconcileAndRequeue handles a sequence-number mismatch from the Aptos node.
+//
+// Causes, in decreasing order of likelihood:
+//  1. Another client submitted a transaction for this account outside our
+//     service, advancing the chain's sequence.
+//  2. We restarted after a crash and the DB counter is now behind chain state.
+//  3. A prior permanent failure left a gap we haven't closed yet.
+//
+// Resolution:
+//  1. Fetch the current sequence from the node.
+//  2. ReconcileSequence raises our counter to max(ours, chain).
+//  3. Requeue the offending record with a cleared sequence_number.
+//  4. Requeue every other sibling in processing state so they'll be re-signed
+//     at fresh, post-reconcile sequence numbers. Without step 4, those
+//     siblings would each hit the same mismatch when their submit fires.
 func (s *Submitter) reconcileAndRequeue(ctx context.Context, rec *store.TransactionRecord, senderAddr aptossdk.AccountAddress) {
 	s.logger.Warn("submitter: sequence mismatch, reconciling", "id", rec.ID, "sender", rec.SenderAddress)
 
@@ -462,6 +578,14 @@ func (s *Submitter) reconcileAndRequeue(ctx context.Context, rec *store.Transact
 	}
 }
 
+// drainPipeline is called after a submit failure cancels the pipeline. It
+// requeues every signed-but-not-yet-submitted item sitting in the channel
+// buffer — those transactions used sequence numbers that are now invalid (or
+// at least suspect) and have to be re-signed from scratch.
+//
+// After draining, we query the node once to reconcile our counter with the
+// chain's current sequence. This prevents the next worker invocation from
+// repeating the same mistake if the failure came from a stale counter.
 func (s *Submitter) drainPipeline(ctx context.Context, ch <-chan signedItem, senderAddress string) {
 	for item := range ch {
 		s.requeueRecord(ctx, item.rec)
@@ -503,6 +627,14 @@ func (s *Submitter) sweepOrphanedProcessing(ctx context.Context, senderAddress s
 	}
 }
 
+// isSequenceError classifies a submit error as "sequence number mismatch".
+//
+// This is string-based because the Aptos SDK surfaces these errors as plain
+// errors without a machine-readable code. The triggers were chosen to match
+// every wording the node is known to emit ("sequence_number too old", "invalid
+// sequence number", etc.) while staying narrow enough not to catch unrelated
+// errors. Fragile: any phrasing change on the node side will cause mismatches
+// to fall through to the generic retry branch until max_retry_duration is hit.
 func isSequenceError(err error) bool {
 	if err == nil {
 		return false
@@ -513,6 +645,9 @@ func isSequenceError(err error) bool {
 		strings.Contains(msg, "invalid_sequence")
 }
 
+// retrySleep backs off between retries in the producer loop with jitter to
+// prevent thundering-herd when multiple workers recover from a shared
+// downstream outage (e.g. Circle returning to service after a blip).
 func (s *Submitter) retrySleep(ctx context.Context) {
 	base := time.Duration(s.cfg.SubmitterRetryIntervalSeconds()) * time.Second
 	jitter := time.Duration(rand.IntN(s.cfg.SubmitterRetryJitterSeconds()+1)) * time.Second
