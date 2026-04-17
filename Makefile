@@ -56,10 +56,6 @@ lint:
 ## check: Format + vet + lint + unit tests
 check: fmt vet lint test
 
-## create-wallets: Create Circle wallets on Aptos testnet
-create-wallets:
-	go run ./examples/create_wallets -count 1
-
 ## clean: Remove build artifacts
 clean:
 	rm -rf bin/
