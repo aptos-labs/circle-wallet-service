@@ -1,5 +1,5 @@
 bin/
 .env
 .env.local
-high_throughput
+/high_throughput
 .idea/
