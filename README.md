@@ -472,6 +472,11 @@ The CLI reads `API_KEY` and `API_BASE_URL` (default `http://localhost:8080`) fro
 
 ## Architecture
 
+**Further reading:**
+
+- [TRANSACTION_PIPELINE.md](TRANSACTION_PIPELINE.md) — end-to-end walkthrough of how a request flows from `/v1/execute` to an on-chain transaction, with Mermaid diagrams for the happy path, failure recovery, and the dispatcher/pipeline state machine.
+- [SEQUENCE_NUMBERS.md](SEQUENCE_NUMBERS.md) — how the per-sender Aptos sequence counter is allocated, reconciled, and recovered, with code references and a state diagram of all counter mutations.
+
 ```
 cmd/
   server/main.go            HTTP server, wiring, graceful shutdown
@@ -540,7 +545,7 @@ Supported Move types: `address`, `bool`, `u8`, `u16`, `u32`, `u64`, `u128`, `u25
 
 ### Persistence and sequencing
 
-Transactions and per-sender Aptos sequence state are stored in **MySQL**. `POST /v1/execute` inserts a `queued` row; the **submitter** dispatcher spawns a worker per sender address. Each worker claims transactions FIFO, atomically allocating a sequence number in the same SQL transaction (`SELECT ... FOR UPDATE` + increment). Workers operate a signing pipeline — signing the next transaction while the current one is being submitted. The **poller** confirms or fails submitted transactions by hash, using conditional updates (`WHERE status = 'submitted'`) to prevent duplicate processing across multiple server instances. On permanent failure, subsequent transactions for the same sender are automatically shifted (re-queued with new sequence numbers).
+Transactions and per-sender Aptos sequence state are stored in **MySQL**. `POST /v1/execute` inserts a `queued` row; the **submitter** dispatcher spawns a worker per sender address. Each worker claims transactions FIFO, atomically allocating a sequence number in the same SQL transaction (`SELECT ... FOR UPDATE` + increment). Workers operate a signing pipeline — signing the next transaction while the current one is being submitted. The **poller** confirms or fails submitted transactions by hash, using conditional updates (`WHERE status = 'submitted'`) to prevent duplicate processing across multiple server instances. On permanent failure, subsequent transactions for the same sender are automatically shifted (re-queued with new sequence numbers). See [SEQUENCE_NUMBERS.md](SEQUENCE_NUMBERS.md) for the full counter lifecycle and code references.
 
 ## Make Targets
 
