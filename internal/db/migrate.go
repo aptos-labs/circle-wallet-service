@@ -45,6 +45,9 @@ func Migrate(mysqlDSN string) error {
 	if err != nil {
 		return fmt.Errorf("migrate mysql driver: %w", err)
 	}
+	defer func() {
+		_ = driver.Close()
+	}()
 
 	d, err := iofs.New(migrationsFS, "migrations")
 	if err != nil {

@@ -103,7 +103,9 @@ func doPost(ctx context.Context, url, apiKey string, body any) (int, []byte, err
 	if err != nil {
 		return 0, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	data, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, data, nil
 }
@@ -119,7 +121,9 @@ func doGet(ctx context.Context, url, apiKey string) (int, []byte, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	data, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, data, nil
 }

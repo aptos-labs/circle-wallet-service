@@ -206,7 +206,9 @@ func TestPoller_PendingTransaction(t *testing.T) {
 		t.Fatalf("notifier calls=%d", n.calls())
 	}
 	got, _ := st.Get(context.Background(), "t3")
-	if got == nil || got.Status != store.StatusSubmitted {
+	if got == nil {
+		t.Fatalf("record %#v", got)
+	} else if got.Status != store.StatusSubmitted {
 		t.Fatalf("status=%v", got.Status)
 	}
 }

@@ -52,7 +52,7 @@ func main() {
 	case "help", "-h", "--help":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", cmd)
+		_, _ = fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", cmd)
 		usage()
 		os.Exit(1)
 	}
@@ -150,7 +150,10 @@ func prettyPrint(data []byte) {
 }
 
 func fatal(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
+	_, err := fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
+	if err != nil {
+		os.Exit(2)
+	}
 	os.Exit(1)
 }
 
