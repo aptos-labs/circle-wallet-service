@@ -1,6 +1,6 @@
 // Fee-payer (sponsored transaction) example for the Circle Wallet Service.
 //
-// Background
+// # Background
 //
 // On Aptos every transaction has to pay gas in APT. For a new user who has
 // just created a wallet, this creates a chicken-and-egg problem: they can't
@@ -28,7 +28,7 @@
 // and submits it. Both signatures are per-transaction; they don't commit the
 // sponsor to anything future.
 //
-// What this example does
+// # What this example does
 //
 // 1. Query the USER's APT balance via /v1/query (before).
 // 2. Submit a transfer FROM the user TO a recipient, with SPONSOR paying gas.

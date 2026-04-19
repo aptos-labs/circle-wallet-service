@@ -191,7 +191,7 @@ func runBob(ctx context.Context, cfg config, start time.Time) []string {
 		body := map[string]any{
 			"wallet_id":       cfg.Bob.WalletID,
 			"address":         cfg.Bob.Address,
-			"function_id":    "0x1::aptos_account::transfer",
+			"function_id":     "0x1::aptos_account::transfer",
 			"arguments":       []any{cfg.Bob.Address, "1"},
 			"idempotency_key": uuid.New().String(),
 		}
@@ -398,7 +398,7 @@ func main() {
 	all := append(append([]string{}, aliceIDs...), bobIDs...)
 	waitForAll(ctx, cfg, all, 90*time.Second, start)
 
-	cancel()   // stop Charlie
+	cancel() // stop Charlie
 	<-charlieDone
 
 	logf(start, "main", "example complete")
