@@ -173,11 +173,12 @@ func run(logger *slog.Logger) error {
 	// either middleware.
 	var inner http.Handler = mux
 	if cfg.RateLimitEnabled() {
+		// Per-wallet limiting isn't implemented; Config.validate rejects
+		// rate_limit.per_wallet=true at startup so we don't pass it through.
 		rl := handler2.NewRateLimitMiddleware(handler2.RateLimiterConfig{
 			Enabled:           true,
 			RequestsPerSecond: cfg.RateLimitRequestsPerSecond(),
 			Burst:             cfg.RateLimitBurst(),
-			PerWallet:         cfg.RateLimitPerWallet(),
 		})
 		inner = rl.Wrap(inner)
 	}

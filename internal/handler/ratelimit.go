@@ -8,11 +8,15 @@ import (
 )
 
 // RateLimiterConfig controls the optional upstream rate limiter.
+//
+// Per-wallet limiting is not yet implemented — the middleware enforces a
+// single global token bucket. Config.validate rejects rate_limit.per_wallet=true
+// at startup so the absence of a PerWallet field here can't silently mislead
+// operators.
 type RateLimiterConfig struct {
 	Enabled           bool
 	RequestsPerSecond int
 	Burst             int
-	PerWallet         bool // TODO: per-wallet limiting (not implemented; global only).
 }
 
 // RateLimitMiddleware wraps an http.Handler with a global token-bucket rate
