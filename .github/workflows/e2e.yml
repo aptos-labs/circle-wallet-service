@@ -1,5 +1,7 @@
 # Live E2E tests against Aptos + Circle + MySQL. Requires repository secrets.
-# When secrets are unset (e.g. forks), the job skips and succeeds.
+# When secrets are unset (e.g. fork PRs, where GitHub withholds secrets), the
+# gate step below flips skip=1 and the remaining steps no-op. This keeps the
+# job green for contributors who can't run a real Circle account.
 
 name: E2E
 
@@ -7,14 +9,28 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+  # Run on PRs too so every change is exercised against live Circle + Aptos
+  # before merging. For PRs from forks, secrets are not exposed and the job
+  # short-circuits via the "Check E2E secrets" gate.
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
+
+# Cancel in-flight E2E runs when a new commit is pushed to the same PR. E2E
+# burns real Circle signatures and Aptos testnet txns — racing two runs
+# against the same account causes sequence-number contention that looks like
+# a test failure but is really just CI queueing.
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   e2e-live:
     name: E2E (live)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       mysql:
         image: mysql:8.0
@@ -36,6 +52,11 @@ jobs:
       CIRCLE_API_KEY: ${{ secrets.CIRCLE_API_KEY }}
       CIRCLE_ENTITY_SECRET: ${{ secrets.CIRCLE_ENTITY_SECRET }}
       CIRCLE_WALLETS: ${{ secrets.CIRCLE_WALLETS }}
+      # Simulation is on by default; the E2E secret already has a live
+      # APTOS_NODE_URL so /transactions/simulate works. Set to false here to
+      # bypass pre-submit simulation if debugging.
+      SIMULATE_BEFORE_SUBMIT: "true"
+      CALIBRATE_GAS_FROM_SIMULATION: "true"
       E2E_BASE_URL: http://127.0.0.1:8080
       E2E_API_KEY: ${{ secrets.API_KEY }}
       E2E_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/jcci_e2e?parseTime=true
