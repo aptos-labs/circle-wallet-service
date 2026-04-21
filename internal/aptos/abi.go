@@ -9,7 +9,8 @@ import (
 	"github.com/aptos-labs/aptos-go-sdk/api"
 )
 
-// defaultABICacheTTL is the amount of time in minutes that the ABI will refresh it's cache (not fetch from on-chain)
+// defaultABICacheTTL is how long a cached module ABI is served before the next
+// access triggers a refresh from the Aptos node.
 const defaultABICacheTTL = 10 * time.Minute
 
 // abiEntry is the info about a single move module
@@ -23,7 +24,7 @@ type abiEntry struct {
 // Entries are evicted after a configurable TTL (default 10 minutes) to pick up
 // contract upgrades.
 type ABICache struct {
-	// Able to lock the cache to ensure it's okay in a concurrent environment
+	// Guards modules for concurrent access.
 	mu      sync.RWMutex
 	modules map[string]abiEntry
 	client  aptos.AptosRpcClient
