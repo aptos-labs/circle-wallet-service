@@ -27,26 +27,27 @@ Wallet IDs and addresses are provided per-request — no wallet configuration on
 
 ### 2. Create Circle Wallets
 
-```bash
-cp .env.example .env
-# Fill in CIRCLE_API_KEY, CIRCLE_ENTITY_SECRET, CIRCLE_WALLET_SET_ID
-make create-wallets
-```
+Create your Circle wallets via the [Circle console](https://console.circle.com) or the Circle API (select network `APTOS-TESTNET` or `APTOS`). For each wallet, note:
 
-This prints wallet details (wallet ID and Aptos address). Note the wallet ID and address — you'll pass them per-request to `/v1/execute`.
+- Wallet ID (UUID)
+- Aptos address
+- Ed25519 public key (optional — the server will fetch this lazily from Circle if omitted)
+
+These are passed per-request to `/v1/execute` — there is no server-side wallet configuration beyond the Circle API key and entity secret.
 
 ### 3. Fund Wallets
 
-Fund your wallet with testnet APT at https://aptos.dev/en/network/faucet
+Fund each wallet address with testnet APT at https://aptos.dev/en/network/faucet
 
 ### 4. Configure
 
-Fill in the remaining `.env` values (at minimum `API_KEY`, `MYSQL_DSN`, and `APTOS_NODE_URL`). See [Configuration](#configuration) for all options.
+Create a `.env` file with at minimum `API_KEY`, `MYSQL_DSN`, `APTOS_NODE_URL`, `CIRCLE_API_KEY`, and `CIRCLE_ENTITY_SECRET`. See [Configuration](#configuration) for all options.
 
 ### 5. Run
 
 ```bash
-make run
+make db-up   # starts MySQL via docker-compose
+make run     # runs migrations and starts the server
 ```
 
 ### 6. Test
@@ -87,7 +88,7 @@ Tests that need two funded wallets skip if only one wallet is configured. Inline
 
 **GitHub Actions**
 
-Workflow [.github/workflows/e2e.yml](.github/workflows/e2e.yml) runs on `workflow_dispatch` and on `push` to `main`. It starts MySQL, builds the server, runs it with secrets, then `go test -tags=e2e ./examples/`. If required secrets are missing, the job **skips** E2E steps and succeeds (so forks without secrets stay green).
+Workflow [.github/workflows/e2e.yml](.github/workflows/e2e.yml) runs on `workflow_dispatch`, on `push` to `main`, and on `pull_request` against `main`. It starts MySQL, builds the server, runs it with secrets, then `go test -tags=e2e ./examples/`. If required secrets are missing, the job **skips** E2E steps and succeeds (so fork PRs without secrets stay green). A concurrency group cancels in-flight E2E runs when a new commit lands on the same ref, so two runs never race against the same Circle wallet.
 
 Configure these **repository secrets** to run live E2E: `API_KEY`, `APTOS_NODE_URL`, `APTOS_CHAIN_ID` (recommended, e.g. `2` for testnet), `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`, `CIRCLE_WALLETS` (JSON array of `{"wallet_id","address","public_key"}` objects used by E2E tests; use **two** wallets to exercise dual-wallet throughput).
 
@@ -124,9 +125,8 @@ The server runs embedded migrations on startup. `GET /v1/health?deep=1` checks d
 |----------|---------|-------------|
 | `CIRCLE_API_KEY` | *(required)* | Circle API key |
 | `CIRCLE_ENTITY_SECRET` | *(required)* | 32-byte hex entity secret |
-| `CIRCLE_WALLET_SET_ID` | | Wallet set ID (only needed for `make create-wallets`) |
 
-Wallet IDs and addresses are provided per-request in the API (not in server config). Public keys are resolved automatically from Circle.
+Wallet IDs and addresses are provided per-request in the API (not in server config). Public keys are resolved lazily from Circle on first use, or can be pinned in-request via the `public_key` field to skip the Circle round-trip.
 
 ### Transaction Settings
 
@@ -514,8 +514,9 @@ internal/
   db/migrations/            Embedded SQL migrations (auto-applied on startup)
 examples/
   e2e_test.go               End-to-end tests against a running server
-  high_throughput/           High-speed usage examples (Go, Python, TypeScript, curl)
-  create_wallets/main.go    Helper to create Circle wallets on Aptos testnet
+  high_throughput/          High-speed usage examples (Go, Python, TypeScript, curl)
+  fee_payer/                Gas-sponsored (fee-payer) usage examples
+  multi_user/               Multi-wallet throughput examples
 config.yaml                 Default configuration with all tunables
 ```
 
@@ -554,7 +555,8 @@ Run `make` to see all available targets:
 ```
 make                 Show help and getting-started steps
 make build           Build server and CLI binaries to bin/
-make run             Run the server (loads .env)
+make run             Run the server (loads .env, runs migrations)
+make migrate         Apply DB migrations without starting the server
 make cli ARGS="..."  Run the CLI
 make test            Run unit tests
 make test-e2e        Run e2e tests (server must be running)
@@ -563,6 +565,10 @@ make fmt             Format code with gofumpt
 make vet             Run go vet
 make lint            Run golangci-lint
 make check           Format + vet + lint + unit tests
-make create-wallets  Create Circle wallets on Aptos testnet
+make db-up           Start MySQL via docker-compose
+make db-down         Stop MySQL (keeps data volume)
+make db-reset        Wipe MySQL data volume and recreate a fresh database
+make db-logs         Tail MySQL container logs
+make db-shell        Open a MySQL shell against the local container
 make clean           Remove build artifacts
 ```

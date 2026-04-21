@@ -143,13 +143,17 @@ Call chain: [`submitSigned`](internal/submitter/submitter.go#L400) → [`requeue
 
 ### Sequence-mismatch failure
 
-Aptos returned `SEQUENCE_NUMBER_TOO_OLD` or `TOO_NEW`. Our counter has drifted from chain state.
+Aptos reported `SEQUENCE_NUMBER_TOO_OLD`, `TOO_NEW`, or `TOO_BIG`, either from `/transactions/simulate` (pre-submit) or from `SubmitTransaction`. Our counter has drifted from chain state.
 
-- Row: requeued.
+- Row: requeued using `requeueWithoutRelease` (clears `sequence_number`, flips to `queued`, **does not** call `ReleaseSequence`).
+- Siblings: every other `processing` row for the same sender is also `requeueWithoutRelease`d — they were signed with sequence numbers that are now invalid.
 - Counter: raised (never lowered) to `GREATEST(next_sequence, chainSeq)`.
 - Why up-only: a txn we just submitted may not be indexed on the node we queried; lowering would cause duplicate-sequence rejection on the next submit.
+- Why not `ReleaseSequence`: reconcile just snapped the counter to chain truth. Decrementing for each requeued slot would push the counter back into the "too old" zone and loop forever at drift=1. See [`memory/sequence_counter_invariant.md`](../.claude/memory/sequence_counter_invariant.md) (or the inline comment on `applyReconcile`).
 
-Call chain: [`submitSigned`](internal/submitter/submitter.go#L400) → [`reconcileAndRequeue`](internal/submitter/submitter.go#L519) → [`ReconcileSequence`](internal/store/mysql/queue.go#L147).
+Call chain (submit path): `submitSigned` → `reconcileAndRequeue` → `applyReconcile` → `ReconcileSequence` + `requeueWithoutRelease`.
+
+Call chain (simulate path): `prepareRecord` → (on `IsSequenceVmStatus` true) → `reconcileAndRequeue` → `applyReconcile`.
 
 ### Permanent failure
 
