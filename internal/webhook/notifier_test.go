@@ -74,7 +74,7 @@ func testLogger() *slog.Logger {
 func TestNotifyInsertsRecord(t *testing.T) {
 	t.Parallel()
 	ms := &mockWebhookStore{}
-	n := NewNotifier("", ms, testLogger())
+	n := NewWebhookNotifier("", ms, testLogger())
 	rec := &store.TransactionRecord{
 		ID:            "txn-1",
 		Status:        store.StatusConfirmed,
@@ -106,7 +106,7 @@ func TestNotifyUsesGlobalURL(t *testing.T) {
 	t.Parallel()
 	ms := &mockWebhookStore{}
 	global := "https://global.example/webhook"
-	n := NewNotifier(global, ms, testLogger())
+	n := NewWebhookNotifier(global, ms, testLogger())
 	rec := &store.TransactionRecord{
 		ID:            "txn-2",
 		Status:        store.StatusQueued,
@@ -128,7 +128,7 @@ func TestNotifyUsesGlobalURL(t *testing.T) {
 func TestNotifyNoURL(t *testing.T) {
 	t.Parallel()
 	ms := &mockWebhookStore{}
-	n := NewNotifier("", ms, testLogger())
+	n := NewWebhookNotifier("", ms, testLogger())
 	rec := &store.TransactionRecord{
 		ID:            "txn-3",
 		Status:        store.StatusQueued,
@@ -147,7 +147,7 @@ func TestNotifyNoURL(t *testing.T) {
 func TestPayloadContainsExpectedFields(t *testing.T) {
 	t.Parallel()
 	ms := &mockWebhookStore{}
-	n := NewNotifier("https://hook/x", ms, testLogger())
+	n := NewWebhookNotifier("https://hook/x", ms, testLogger())
 	rec := &store.TransactionRecord{
 		ID:            "txn-4",
 		Status:        store.StatusSubmitted,
@@ -194,7 +194,7 @@ func TestPayloadContainsExpectedFields(t *testing.T) {
 func TestNotifierPayloadFormat(t *testing.T) {
 	t.Parallel()
 	ms := &mockWebhookStore{}
-	n := NewNotifier("https://hook/x", ms, testLogger())
+	n := NewWebhookNotifier("https://hook/x", ms, testLogger())
 	rec := &store.TransactionRecord{
 		ID:            "txn-fmt",
 		Status:        store.StatusFailed,
@@ -232,7 +232,7 @@ func TestNotifierPayloadFormat(t *testing.T) {
 func TestNotifierPayloadFormatWithoutOptionalHashes(t *testing.T) {
 	t.Parallel()
 	ms := &mockWebhookStore{}
-	n := NewNotifier("https://hook/x", ms, testLogger())
+	n := NewWebhookNotifier("https://hook/x", ms, testLogger())
 	rec := &store.TransactionRecord{
 		ID:            "txn-fmt2",
 		Status:        store.StatusQueued,

@@ -138,7 +138,7 @@ func TestPermanentFailureShifts(t *testing.T) {
 		notifier: &n,
 		logger:   slog.New(slog.DiscardHandler),
 	}
-	s.markPermanentFailure(context.Background(), rec, "permanent")
+	s.markPermanentFailure(context.Background(), rec, "validation", "permanent")
 
 	if n.count != 1 {
 		t.Fatalf("notify count %d", n.count)
@@ -148,6 +148,45 @@ func TestPermanentFailureShifts(t *testing.T) {
 	}
 	if mq.lastUpdate == nil || mq.lastUpdate.Status != store.StatusFailed || mq.lastUpdate.ErrorMessage != "permanent" {
 		t.Fatalf("update record: %+v", mq.lastUpdate)
+	}
+	if mq.lastUpdate.FailureKind != "validation" {
+		t.Fatalf("failure kind %q", mq.lastUpdate.FailureKind)
+	}
+}
+
+func TestMarkSimulationFailureSetsVmStatus(t *testing.T) {
+	t.Parallel()
+	seq := uint64(3)
+	rec := &store.TransactionRecord{
+		ID:             "tid-sim",
+		SenderAddress:  "0x1",
+		Status:         store.StatusProcessing,
+		SequenceNumber: &seq,
+	}
+	var n notifyRecorder
+	mq := &mockQueue{}
+	s := &Submitter{
+		cfg:      &config.Config{},
+		queue:    mq,
+		notifier: &n,
+		logger:   slog.New(slog.DiscardHandler),
+	}
+	s.markSimulationFailure(context.Background(), rec, "Move abort EINSUFFICIENT_BALANCE", "simulation rejected")
+
+	if mq.lastUpdate == nil {
+		t.Fatal("expected Update")
+	}
+	if mq.lastUpdate.FailureKind != "simulation" {
+		t.Fatalf("failure kind %q", mq.lastUpdate.FailureKind)
+	}
+	if mq.lastUpdate.VmStatus != "Move abort EINSUFFICIENT_BALANCE" {
+		t.Fatalf("vm status %q", mq.lastUpdate.VmStatus)
+	}
+	if mq.shiftCount != 1 {
+		t.Fatalf("expected shift to unblock siblings, got %d", mq.shiftCount)
+	}
+	if n.count != 1 {
+		t.Fatalf("expected webhook notify, got %d", n.count)
 	}
 }
 
@@ -283,6 +322,11 @@ type mockQueue struct {
 
 	releaseCount  int
 	releaseSender string
+
+	reconcileCount int
+	reconcileSeq   uint64
+
+	listByStatus func(ctx context.Context, status store.TxnStatus) ([]*store.TransactionRecord, error)
 }
 
 func (m *mockQueue) loadClaimCalls() int {
@@ -348,11 +392,21 @@ func (m *mockQueue) GetByIdempotencyKey(ctx context.Context, key string) (*store
 }
 
 func (m *mockQueue) ListByStatus(ctx context.Context, status store.TxnStatus) ([]*store.TransactionRecord, error) {
+	m.mu.Lock()
+	fn := m.listByStatus
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, status)
+	}
 	return nil, nil
 }
 func (m *mockQueue) Close() error { return nil }
 
 func (m *mockQueue) ReconcileSequence(ctx context.Context, senderAddress string, chainSeq uint64) error {
+	m.mu.Lock()
+	m.reconcileCount++
+	m.reconcileSeq = chainSeq
+	m.mu.Unlock()
 	return nil
 }
 
@@ -505,7 +559,7 @@ func TestMarkPermanentFailure_NoSequence(t *testing.T) {
 		notifier: noopNotifier{},
 		logger:   slog.New(slog.DiscardHandler),
 	}
-	s.markPermanentFailure(context.Background(), rec, "boom")
+	s.markPermanentFailure(context.Background(), rec, "submit", "boom")
 	if mq.shiftCount != 0 {
 		t.Fatalf("ShiftSenderSequences calls=%d", mq.shiftCount)
 	}
@@ -829,7 +883,7 @@ func TestMarkPermanentFailure_UpdateError(t *testing.T) {
 		notifier: &n,
 		logger:   slog.New(slog.DiscardHandler),
 	}
-	s.markPermanentFailure(context.Background(), rec, "bad")
+	s.markPermanentFailure(context.Background(), rec, "validation", "bad")
 	if n.count != 1 {
 		t.Fatalf("notify count=%d", n.count)
 	}
@@ -1016,8 +1070,125 @@ func TestMarkPermanentFailure_ShiftError(t *testing.T) {
 		notifier: noopNotifier{},
 		logger:   slog.New(slog.DiscardHandler),
 	}
-	s.markPermanentFailure(context.Background(), rec, "failed")
+	s.markPermanentFailure(context.Background(), rec, "submit", "failed")
 	if mq.shiftCount != 1 {
 		t.Fatalf("shift attempts=%d", mq.shiftCount)
+	}
+}
+
+// TestRequeueWithoutRelease verifies the reconcile-path requeue helper does
+// not touch the sequence counter. Regression test for the drift=1 infinite
+// loop: if ReleaseSequence ran here, the counter would decrement by 1 after
+// each reconcile, pushing the next allocation back into "too old" territory.
+func TestRequeueWithoutRelease(t *testing.T) {
+	t.Parallel()
+	seq := uint64(44)
+	rec := &store.TransactionRecord{
+		ID:             "r-no-release",
+		SenderAddress:  "0xabc",
+		Status:         store.StatusProcessing,
+		SequenceNumber: &seq,
+	}
+	mq := &mockQueue{}
+	s := &Submitter{queue: mq, logger: slog.New(slog.DiscardHandler)}
+
+	s.requeueWithoutRelease(context.Background(), rec)
+
+	if mq.releaseCount != 0 {
+		t.Fatalf("ReleaseSequence called %d times, expected 0 — counter must not move on reconcile-path requeue", mq.releaseCount)
+	}
+	if mq.lastUpdate == nil {
+		t.Fatal("expected an Update call")
+	}
+	if mq.lastUpdate.Status != store.StatusQueued {
+		t.Fatalf("status = %s, want queued", mq.lastUpdate.Status)
+	}
+	if mq.lastUpdate.SequenceNumber != nil {
+		t.Fatalf("sequence_number should be nil, got %d", *mq.lastUpdate.SequenceNumber)
+	}
+}
+
+// TestApplyReconcile_DoesNotReleaseCounter is the regression test for the
+// drift=1 infinite loop. Scenario: chain is at seq=45, local claimed seq=4,
+// submit failed with SEQUENCE_NUMBER_TOO_OLD. After applyReconcile runs:
+//   - ReconcileSequence must be called with chainSeq=45
+//   - ReleaseSequence must NOT be called (would push counter back to 44 and
+//     make the next claim hit TOO_OLD again by drift=1)
+//   - ShiftSenderSequences must NOT be called (same reason)
+//   - The record must be queued with sequence_number=nil
+//   - Processing siblings must be requeued WITHOUT their own release calls
+func TestApplyReconcile_DoesNotReleaseCounter(t *testing.T) {
+	t.Parallel()
+	seq := uint64(4)
+	rec := &store.TransactionRecord{
+		ID:             "rec-main",
+		SenderAddress:  "0xabc",
+		Status:         store.StatusProcessing,
+		SequenceNumber: &seq,
+	}
+	siblingSeq := uint64(5)
+	sibling := &store.TransactionRecord{
+		ID:             "rec-sibling",
+		SenderAddress:  "0xabc",
+		Status:         store.StatusProcessing,
+		SequenceNumber: &siblingSeq,
+	}
+	otherSenderSeq := uint64(9)
+	otherSender := &store.TransactionRecord{
+		ID:             "rec-other",
+		SenderAddress:  "0xdef",
+		Status:         store.StatusProcessing,
+		SequenceNumber: &otherSenderSeq,
+	}
+	mq := &mockQueue{
+		listByStatus: func(_ context.Context, _ store.TxnStatus) ([]*store.TransactionRecord, error) {
+			return []*store.TransactionRecord{rec, sibling, otherSender}, nil
+		},
+	}
+	s := &Submitter{queue: mq, logger: slog.New(slog.DiscardHandler)}
+
+	s.applyReconcile(context.Background(), rec, 4, 45)
+
+	if mq.reconcileCount != 1 {
+		t.Fatalf("ReconcileSequence called %d times, want 1", mq.reconcileCount)
+	}
+	if mq.reconcileSeq != 45 {
+		t.Fatalf("ReconcileSequence chainSeq=%d, want 45", mq.reconcileSeq)
+	}
+	if mq.releaseCount != 0 {
+		t.Fatalf("ReleaseSequence called %d times, want 0 — would push counter back into TOO_OLD zone", mq.releaseCount)
+	}
+	if mq.shiftCount != 0 {
+		t.Fatalf("ShiftSenderSequences called %d times, want 0 — counter must not move after reconcile", mq.shiftCount)
+	}
+	// lastUpdate should be the main record (it's updated last, after the sibling requeue).
+	if mq.lastUpdate == nil {
+		t.Fatal("no Update recorded")
+	}
+	if mq.lastUpdate.ID != rec.ID {
+		t.Fatalf("last Update was for %s, want %s", mq.lastUpdate.ID, rec.ID)
+	}
+	if mq.lastUpdate.Status != store.StatusQueued {
+		t.Fatalf("main record status=%s, want queued", mq.lastUpdate.Status)
+	}
+	if mq.lastUpdate.SequenceNumber != nil {
+		t.Fatalf("main record sequence_number=%d, want nil", *mq.lastUpdate.SequenceNumber)
+	}
+	if mq.lastUpdate.AttemptCount != 1 {
+		t.Fatalf("attempt_count=%d, want 1", mq.lastUpdate.AttemptCount)
+	}
+	// Confirm the sibling was requeued (its row was mutated in place).
+	if sibling.Status != store.StatusQueued {
+		t.Fatalf("sibling status=%s, want queued", sibling.Status)
+	}
+	if sibling.SequenceNumber != nil {
+		t.Fatalf("sibling sequence_number=%d, want nil", *sibling.SequenceNumber)
+	}
+	// The different-sender record must be untouched.
+	if otherSender.Status != store.StatusProcessing {
+		t.Fatalf("otherSender status=%s, want still processing", otherSender.Status)
+	}
+	if otherSender.SequenceNumber == nil || *otherSender.SequenceNumber != 9 {
+		t.Fatalf("otherSender sequence_number mutated, got %v", otherSender.SequenceNumber)
 	}
 }

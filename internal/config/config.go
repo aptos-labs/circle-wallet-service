@@ -77,6 +77,18 @@ type SubmitterConfig struct {
 	StaleProcessingSeconds  int `yaml:"stale_processing_seconds"`
 	RecoveryTickSeconds     int `yaml:"recovery_tick_seconds"`
 	SigningPipelineDepth    int `yaml:"signing_pipeline_depth"`
+	// SimulateBeforeSubmit runs /transactions/simulate between build and sign.
+	// On VM-level rejection (Success=false), the row is marked failed with
+	// vm_status instead of burning a Circle signing round-trip and an on-chain
+	// submission. Transient node errors (503/429/timeouts) fall through to the
+	// normal requeue path. Defaults to true.
+	SimulateBeforeSubmit bool `yaml:"simulate_before_submit"`
+	// CalibrateGasFromSimulation uses the simulation's gas_used to shrink
+	// max_gas_amount for the real submit (gas_used * 1.5, floored to the caller's
+	// request when that's smaller). Reduces how much gas each sender reserves
+	// per txn. Defaults to true; only takes effect when SimulateBeforeSubmit is
+	// also enabled.
+	CalibrateGasFromSimulation bool `yaml:"calibrate_gas_from_simulation"`
 }
 
 type PollerConfig struct {
@@ -126,13 +138,15 @@ func defaultConfig() *Config {
 			ExpirationSeconds: 60,
 		},
 		Submitter: SubmitterConfig{
-			PollIntervalMs:          200,
-			MaxRetryDurationSeconds: 300,
-			RetryIntervalSeconds:    5,
-			RetryJitterSeconds:      2,
-			StaleProcessingSeconds:  120,
-			RecoveryTickSeconds:     30,
-			SigningPipelineDepth:    4,
+			PollIntervalMs:             200,
+			MaxRetryDurationSeconds:    300,
+			RetryIntervalSeconds:       5,
+			RetryJitterSeconds:         2,
+			StaleProcessingSeconds:     120,
+			RecoveryTickSeconds:        30,
+			SigningPipelineDepth:       4,
+			SimulateBeforeSubmit:       true,
+			CalibrateGasFromSimulation: true,
 		},
 		Poller: PollerConfig{IntervalSeconds: 5},
 		Webhook: WebhookConfig{
@@ -236,6 +250,20 @@ func applyEnvOverrides(c *Config) error {
 			return fmt.Errorf("TXN_EXPIRATION_SECONDS: %w", err)
 		}
 		c.Transaction.ExpirationSeconds = n
+	}
+	if v, ok := os.LookupEnv("SIMULATE_BEFORE_SUBMIT"); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("SIMULATE_BEFORE_SUBMIT: %w", err)
+		}
+		c.Submitter.SimulateBeforeSubmit = b
+	}
+	if v, ok := os.LookupEnv("CALIBRATE_GAS_FROM_SIMULATION"); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("CALIBRATE_GAS_FROM_SIMULATION: %w", err)
+		}
+		c.Submitter.CalibrateGasFromSimulation = b
 	}
 	return nil
 }
@@ -344,6 +372,14 @@ func (c *Config) SubmitterRecoveryTickSeconds() int {
 
 func (c *Config) SubmitterSigningPipelineDepth() int {
 	return c.Submitter.SigningPipelineDepth
+}
+
+func (c *Config) SimulateBeforeSubmit() bool {
+	return c.Submitter.SimulateBeforeSubmit
+}
+
+func (c *Config) CalibrateGasFromSimulation() bool {
+	return c.Submitter.CalibrateGasFromSimulation
 }
 
 func (c *Config) WebhookMaxRetries() int {

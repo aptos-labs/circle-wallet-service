@@ -11,40 +11,83 @@ import (
 )
 
 // Payload is the JSON body POSTed to webhook URLs on terminal transaction status.
+//
+// FailureKind and VmStatus are populated only for failed transactions.
+// FailureKind is a coarse taxonomy ("simulation", "submit", "expired",
+// "validation", "signing", "assembly") so consumers can route programmatically
+// without parsing error_message. VmStatus carries the Aptos VM's structured
+// rejection reason (e.g. "Move abort … EINSUFFICIENT_BALANCE") and is only set
+// when the failure came from pre-submit simulation.
 type Payload struct {
 	TransactionID string          `json:"transaction_id"`
 	Status        store.TxnStatus `json:"status"`
 	TxnHash       string          `json:"txn_hash,omitempty"`
 	ErrorMessage  string          `json:"error_message,omitempty"`
+	FailureKind   string          `json:"failure_kind,omitempty"`
+	VmStatus      string          `json:"vm_status,omitempty"`
 	SenderAddress string          `json:"sender_address"`
 	FunctionID    string          `json:"function_id"`
 	Timestamp     time.Time       `json:"timestamp"`
 }
 
-// Notifier writes delivery records to the persistent outbox. It resolves the
-// webhook URL (per-request URL takes precedence over globalURL) and inserts a
+type Notifier interface {
+	// Notify sends a message to a consumer
+	Notify(ctx context.Context, rec *store.TransactionRecord)
+}
+
+type NoopNotifier struct{}
+
+func NewNoopNotifier() Notifier {
+	return &NoopNotifier{}
+}
+
+// Notify does nothing
+func (n *NoopNotifier) Notify(_ context.Context, _ *store.TransactionRecord) {}
+
+type DebugNotifier struct {
+	logger *slog.Logger
+}
+
+func NewDebugNotifier(logger *slog.Logger) Notifier {
+	return &WebHookNotifier{
+		logger: logger,
+	}
+}
+
+// Notify sends a message to a log
+func (n *DebugNotifier) Notify(_ context.Context, rec *store.TransactionRecord) {
+	n.logger.Debug("debug notifier", "txn", rec)
+}
+
+// WebHookNotifier writes delivery records to the persistent outbox. It resolves the
+// webhook URL (per-request URL) and inserts a
 // pending [DeliveryRecord] for the [Worker] to pick up.
-type Notifier struct {
-	globalURL string
+type WebHookNotifier struct {
+	globalUrl string
 	store     WebhookStore
 	logger    *slog.Logger
 }
 
-func NewNotifier(globalURL string, ws WebhookStore, logger *slog.Logger) *Notifier {
-	return &Notifier{
-		globalURL: globalURL,
+func NewWebhookNotifier(globalUrl string, ws WebhookStore, logger *slog.Logger) Notifier {
+	return &WebHookNotifier{
+		globalUrl: globalUrl,
 		store:     ws,
 		logger:    logger,
 	}
 }
 
-func (n *Notifier) Notify(ctx context.Context, rec *store.TransactionRecord) {
+// Notify sends a message to the webhook consumer
+func (n *WebHookNotifier) Notify(ctx context.Context, rec *store.TransactionRecord) {
 	url := rec.WebhookURL
+
 	if url == "" {
-		url = n.globalURL
-	}
-	if url == "" {
-		return
+		if n.globalUrl != "" {
+			// Use global if available
+			url = n.globalUrl
+		} else {
+			// Quit early if no webhook
+			return
+		}
 	}
 
 	payload := Payload{
@@ -52,6 +95,8 @@ func (n *Notifier) Notify(ctx context.Context, rec *store.TransactionRecord) {
 		Status:        rec.Status,
 		TxnHash:       rec.TxnHash,
 		ErrorMessage:  rec.ErrorMessage,
+		FailureKind:   rec.FailureKind,
+		VmStatus:      rec.VmStatus,
 		SenderAddress: rec.SenderAddress,
 		FunctionID:    rec.FunctionID,
 		Timestamp:     time.Now().UTC(),
