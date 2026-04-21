@@ -247,6 +247,19 @@ func (s *Submitter) pipelineProducer(ctx context.Context, senderAddress string, 
 		if rec == nil {
 			return
 		}
+		// Log allocated sequence at claim time. The allocated sequence equals the
+		// value of account_sequences.next_sequence BEFORE this claim's increment
+		// — i.e. what the chain must accept for this submit to succeed.
+		var claimedSeq uint64
+		if rec.SequenceNumber != nil {
+			claimedSeq = *rec.SequenceNumber
+		}
+		s.logger.Info("submitter: claimed",
+			"id", rec.ID,
+			"sender", senderAddress,
+			"sequence", claimedSeq,
+			"attempt", rec.AttemptCount,
+		)
 
 		item, transient := s.prepareRecord(ctx, rec)
 		if item == nil {
@@ -286,13 +299,13 @@ func (s *Submitter) prepareRecord(ctx context.Context, rec *store.TransactionRec
 	now := time.Now().UTC()
 
 	if now.After(rec.ExpiresAt) {
-		s.markPermanentFailure(ctx, rec, "transaction expired before submit")
+		s.markPermanentFailure(ctx, rec, "expired", "transaction expired before submit")
 		return nil, false
 	}
 
 	maxDuration := time.Duration(s.cfg.SubmitterMaxRetryDurationSeconds()) * time.Second
 	if time.Since(rec.CreatedAt) > maxDuration {
-		s.markPermanentFailure(ctx, rec, "max retry duration exceeded")
+		s.markPermanentFailure(ctx, rec, "expired", "max retry duration exceeded")
 		return nil, false
 	}
 
@@ -304,29 +317,29 @@ func (s *Submitter) prepareRecord(ctx context.Context, rec *store.TransactionRec
 
 	wallet, err := resolveWallet(ctx, s.pkCache, rec)
 	if err != nil {
-		s.markPermanentFailure(ctx, rec, err.Error())
+		s.markPermanentFailure(ctx, rec, "validation", err.Error())
 		return nil, false
 	}
 	if err := wallet.VerifyWallet(); err != nil {
-		s.markPermanentFailure(ctx, rec, "invalid wallet: "+err.Error())
+		s.markPermanentFailure(ctx, rec, "validation", "invalid wallet: "+err.Error())
 		return nil, false
 	}
 
 	var qp store.QueuedPayload
 	if err := json.Unmarshal([]byte(rec.PayloadJSON), &qp); err != nil {
-		s.markPermanentFailure(ctx, rec, "bad payload_json: "+err.Error())
+		s.markPermanentFailure(ctx, rec, "validation", "bad payload_json: "+err.Error())
 		return nil, false
 	}
 
 	entry, err := s.abi.BuildEntryFunctionPayload(rec.FunctionID, qp.TypeArguments, qp.Arguments)
 	if err != nil {
-		s.markPermanentFailure(ctx, rec, err.Error())
+		s.markPermanentFailure(ctx, rec, "validation", err.Error())
 		return nil, false
 	}
 
 	senderAddr, err := aptos.ParseAddress(wallet.Address)
 	if err != nil {
-		s.markPermanentFailure(ctx, rec, err.Error())
+		s.markPermanentFailure(ctx, rec, "validation", err.Error())
 		return nil, false
 	}
 
@@ -343,17 +356,89 @@ func (s *Submitter) prepareRecord(ctx context.Context, rec *store.TransactionRec
 	if hasSeparateFeePayer {
 		feePayerAddr, err = aptos.ParseAddress(rec.FeePayerAddress)
 		if err != nil {
-			s.markPermanentFailure(ctx, rec, "invalid fee_payer_address: "+err.Error())
+			s.markPermanentFailure(ctx, rec, "validation", "invalid fee_payer_address: "+err.Error())
 			return nil, false
 		}
 	} else {
 		feePayerAddr = senderAddr
 	}
 
+	// Resolve the fee payer public key up front so we can feed it to
+	// simulation before paying for Circle signing. For self-pay transactions
+	// the sender key is reused.
+	feePayerPubKey := wallet.PublicKey
+	if hasSeparateFeePayer {
+		fpPubKey, err := s.pkCache.Resolve(ctx, rec.FeePayerWalletID)
+		if err != nil {
+			s.requeueTransient(ctx, rec, fmt.Errorf("resolve fee-payer public key: %w", err))
+			return nil, true
+		}
+		feePayerPubKey = fpPubKey
+	}
+
 	rawTxn, err := s.client.BuildFeePayerTransaction(senderAddr, feePayerAddr, payload, maxGas, useSeq)
 	if err != nil {
 		s.requeueTransient(ctx, rec, err)
 		return nil, true
+	}
+
+	// Simulate before we burn a Circle signing round-trip. On a VM-level
+	// rejection (e.g. INSUFFICIENT_BALANCE) this record is terminated with
+	// kind=simulation and ShiftSenderSequences unblocks every sibling behind
+	// it. Transient node errors (503/429/network) fall through to the same
+	// requeue path as a build failure — the simulate verdict is "unknown",
+	// not "rejected", so we retry rather than fail.
+	//
+	// When gas calibration is enabled, the real max_gas_amount is tightened
+	// to gas_used * 1.5 (or the caller's maxGas if they set something
+	// smaller). This reduces the per-transaction gas reserve without risking
+	// legitimate over-estimates from the VM.
+	if s.cfg.SimulateBeforeSubmit() {
+		userTxn, simErr := s.client.SimulateFeePayerTransaction(ctx, rawTxn, wallet.PublicKey, feePayerPubKey)
+		if simErr != nil {
+			if aptos.IsTransientSimulationError(simErr) {
+				s.requeueTransient(ctx, rec, fmt.Errorf("simulate: %w", simErr))
+				return nil, true
+			}
+			s.markPermanentFailure(ctx, rec, "simulation", "simulation failed: "+simErr.Error())
+			return nil, false
+		}
+		if !userTxn.Success {
+			// A sequence VM status from simulation is NOT a real rejection —
+			// the transaction would be valid at a different sequence number.
+			// Route it through the same reconcile-and-requeue path the submit
+			// failure uses so the local counter catches up to the chain and
+			// the next claim gets a fresh, valid sequence. Treating it as a
+			// permanent failure (as the default simulation path does) would
+			// leave the counter stuck and every subsequent submit would hit
+			// the same VM status.
+			if aptos.IsSequenceVmStatus(userTxn.VmStatus) {
+				s.logger.Warn("submitter: simulation reported sequence VM status; reconciling",
+					"id", rec.ID,
+					"sender", rec.SenderAddress,
+					"sequence", useSeq,
+					"vm_status", userTxn.VmStatus,
+				)
+				s.reconcileAndRequeue(ctx, rec, senderAddr)
+				return nil, true
+			}
+			s.markSimulationFailure(ctx, rec, userTxn.VmStatus, "simulation rejected: "+userTxn.VmStatus)
+			return nil, false
+		}
+		if s.cfg.CalibrateGasFromSimulation() && userTxn.GasUsed > 0 {
+			calibrated := userTxn.GasUsed + userTxn.GasUsed/2 // gas_used * 1.5
+			if maxGas == 0 || calibrated < maxGas {
+				rebuilt, err := s.client.BuildFeePayerTransaction(senderAddr, feePayerAddr, payload, calibrated, useSeq)
+				if err != nil {
+					// Fall back to the original rawTxn; the pre-calibration
+					// build already succeeded so a rebuild failure here is
+					// surprising, but it's not worth failing the record over.
+					s.logger.Warn("submitter: gas-calibration rebuild failed, using original", "id", rec.ID, "error", err)
+				} else {
+					rawTxn = rebuilt
+				}
+			}
+		}
 	}
 
 	senderAuth, err := s.signer.SignTransaction(ctx, rawTxn, wallet.WalletID, wallet.PublicKey)
@@ -364,12 +449,7 @@ func (s *Submitter) prepareRecord(ctx context.Context, rec *store.TransactionRec
 
 	var feePayerAuth *crypto.AccountAuthenticator
 	if hasSeparateFeePayer {
-		fpPubKey, err := s.pkCache.Resolve(ctx, rec.FeePayerWalletID)
-		if err != nil {
-			s.requeueTransient(ctx, rec, fmt.Errorf("resolve fee-payer public key: %w", err))
-			return nil, true
-		}
-		feePayerAuth, err = s.signer.SignTransaction(ctx, rawTxn, rec.FeePayerWalletID, fpPubKey)
+		feePayerAuth, err = s.signer.SignTransaction(ctx, rawTxn, rec.FeePayerWalletID, feePayerPubKey)
 		if err != nil {
 			s.requeueTransient(ctx, rec, fmt.Errorf("fee-payer sign: %w", err))
 			return nil, true
@@ -380,7 +460,7 @@ func (s *Submitter) prepareRecord(ctx context.Context, rec *store.TransactionRec
 
 	signedTxn, ok := rawTxn.ToFeePayerSignedTransaction(senderAuth, feePayerAuth, []crypto.AccountAuthenticator{})
 	if !ok {
-		s.markPermanentFailure(ctx, rec, "failed to assemble signed transaction")
+		s.markPermanentFailure(ctx, rec, "assembly", "failed to assemble signed transaction")
 		return nil, false
 	}
 
@@ -402,9 +482,24 @@ func (s *Submitter) submitSigned(ctx context.Context, item *signedItem) bool {
 	if sub == nil {
 		sub = s.client
 	}
+	// Pre-submit log: the sequence number being sent to the chain. Paired with
+	// the claim log above, this bounds exactly which counter value was used for
+	// this submit attempt.
+	s.logger.Info("submitter: submitting",
+		"id", item.rec.ID,
+		"sender", item.rec.SenderAddress,
+		"sequence", item.seqNum,
+		"attempt", item.rec.AttemptCount,
+	)
 	submitResp, err := sub.SubmitTransaction(item.signedTxn)
 	if err != nil {
 		if isSequenceError(err) {
+			s.logger.Warn("submitter: submit rejected as sequence error",
+				"id", item.rec.ID,
+				"sender", item.rec.SenderAddress,
+				"sequence", item.seqNum,
+				"error", err,
+			)
 			senderAddr, parseErr := aptos.ParseAddress(item.rec.SenderAddress)
 			if parseErr == nil {
 				s.reconcileAndRequeue(ctx, item.rec, senderAddr)
@@ -415,7 +510,7 @@ func (s *Submitter) submitSigned(ctx context.Context, item *signedItem) bool {
 		}
 		maxDuration := time.Duration(s.cfg.SubmitterMaxRetryDurationSeconds()) * time.Second
 		if time.Since(item.rec.CreatedAt) > maxDuration {
-			s.markPermanentFailure(ctx, item.rec, err.Error())
+			s.markPermanentFailure(ctx, item.rec, "submit", err.Error())
 		} else {
 			s.requeueTransient(ctx, item.rec, err)
 		}
@@ -441,19 +536,52 @@ func (s *Submitter) submitSigned(ctx context.Context, item *signedItem) bool {
 // back to queued so they'll be re-claimed with fresh sequences — this
 // prevents a permanent gap in the per-sender sequence stream that would block
 // every subsequent submit for that account.
-func (s *Submitter) markPermanentFailure(ctx context.Context, rec *store.TransactionRecord, msg string) {
+//
+// kind categorizes the failure for consumers (e.g. "simulation", "submit",
+// "expired", "validation"). It is persisted on the row and included in the
+// webhook payload so handlers don't have to parse msg to route failures.
+func (s *Submitter) markPermanentFailure(ctx context.Context, rec *store.TransactionRecord, kind, msg string) {
+	var failedSeq uint64
+	hasSeq := rec.SequenceNumber != nil
+	if hasSeq {
+		failedSeq = *rec.SequenceNumber
+	}
+	s.logger.Warn("submitter: permanent failure",
+		"id", rec.ID,
+		"sender", rec.SenderAddress,
+		"kind", kind,
+		"sequence", failedSeq,
+		"has_sequence", hasSeq,
+		"msg", msg,
+	)
 	rec.Status = store.StatusFailed
 	rec.ErrorMessage = msg
+	rec.FailureKind = kind
 	rec.UpdatedAt = time.Now().UTC()
 	if err := s.queue.Update(ctx, rec); err != nil {
 		s.logger.Error("submitter: mark failed", "id", rec.ID, "error", err)
 	}
-	if rec.SequenceNumber != nil {
-		if err := s.queue.ShiftSenderSequences(ctx, rec.SenderAddress, *rec.SequenceNumber); err != nil {
+	if hasSeq {
+		if err := s.queue.ShiftSenderSequences(ctx, rec.SenderAddress, failedSeq); err != nil {
 			s.logger.Error("submitter: shift sequences", "sender", rec.SenderAddress, "error", err)
+		} else {
+			s.logger.Info("submitter: shifted siblings after permanent failure",
+				"id", rec.ID,
+				"sender", rec.SenderAddress,
+				"failed_seq", failedSeq,
+			)
 		}
 	}
 	s.notifier.Notify(ctx, rec)
+}
+
+// markSimulationFailure is the simulation-specific variant that additionally
+// records the Aptos VM's structured failure reason. Consumers can use
+// vm_status to distinguish state-dependent failures (INSUFFICIENT_BALANCE) from
+// code-level bugs (MISSING_DATA, OUT_OF_GAS) without parsing error_message.
+func (s *Submitter) markSimulationFailure(ctx context.Context, rec *store.TransactionRecord, vmStatus, msg string) {
+	rec.VmStatus = vmStatus
+	s.markPermanentFailure(ctx, rec, "simulation", msg)
 }
 
 // requeueTransient puts a record back in queued state after a recoverable
@@ -465,8 +593,18 @@ func (s *Submitter) markPermanentFailure(ctx context.Context, rec *store.Transac
 // — the wall-clock max_retry_duration check in prepareRecord / submitSigned
 // is what caps retries.
 func (s *Submitter) requeueTransient(ctx context.Context, rec *store.TransactionRecord, err error) {
-	s.logger.Warn("submitter: retry", "id", rec.ID, "error", err)
+	var releasedSeq uint64
 	hadSequence := rec.SequenceNumber != nil
+	if hadSequence {
+		releasedSeq = *rec.SequenceNumber
+	}
+	s.logger.Warn("submitter: retry",
+		"id", rec.ID,
+		"sender", rec.SenderAddress,
+		"had_sequence", hadSequence,
+		"released_seq", releasedSeq,
+		"error", err,
+	)
 	rec.Status = store.StatusQueued
 	rec.SequenceNumber = nil
 	rec.AttemptCount++
@@ -478,6 +616,12 @@ func (s *Submitter) requeueTransient(ctx context.Context, rec *store.Transaction
 	if hadSequence {
 		if err2 := s.queue.ReleaseSequence(ctx, rec.SenderAddress); err2 != nil {
 			s.logger.Error("submitter: release sequence", "id", rec.ID, "error", err2)
+		} else {
+			s.logger.Info("submitter: released sequence (counter -1)",
+				"id", rec.ID,
+				"sender", rec.SenderAddress,
+				"released_seq", releasedSeq,
+			)
 		}
 	}
 }
@@ -517,7 +661,15 @@ func (s *Submitter) requeueRecord(ctx context.Context, rec *store.TransactionRec
 //     at fresh, post-reconcile sequence numbers. Without step 4, those
 //     siblings would each hit the same mismatch when their submit fires.
 func (s *Submitter) reconcileAndRequeue(ctx context.Context, rec *store.TransactionRecord, senderAddr aptossdk.AccountAddress) {
-	s.logger.Warn("submitter: sequence mismatch, reconciling", "id", rec.ID, "sender", rec.SenderAddress)
+	var localSeq uint64
+	if rec.SequenceNumber != nil {
+		localSeq = *rec.SequenceNumber
+	}
+	s.logger.Warn("submitter: sequence mismatch, reconciling",
+		"id", rec.ID,
+		"sender", rec.SenderAddress,
+		"local_seq_used", localSeq,
+	)
 
 	info, err := s.client.Inner.Account(senderAddr)
 	if err != nil {
@@ -532,22 +684,55 @@ func (s *Submitter) reconcileAndRequeue(ctx context.Context, rec *store.Transact
 		return
 	}
 
+	s.applyReconcile(ctx, rec, localSeq, chainSeq)
+}
+
+// applyReconcile is the post-fetch half of reconcileAndRequeue. Split out so
+// tests can exercise the counter-mutation logic without needing a live Aptos
+// node.
+//
+// Counter-semantics invariant: we must NOT call ReleaseSequence (or
+// ShiftSenderSequences) for any record whose sequence we've given up here.
+// ReconcileSequence just snapped the counter to chain truth; decrementing it
+// per released record would push the counter back into the "too old" zone
+// and we'd loop forever at drift=N. The slots being "released" were already
+// invalidated when reconcile bumped the counter — decrementing would
+// double-count the correction. Post-reconcile, the counter is authoritative;
+// any stale allocations silently evaporate.
+func (s *Submitter) applyReconcile(ctx context.Context, rec *store.TransactionRecord, localSeq, chainSeq uint64) {
+	// Direct comparison: the chain's current sequence vs what we just tried to
+	// submit. If chain_seq > local_seq_used, our local counter was behind —
+	// most commonly because the account had pre-existing txns when this
+	// service first touched it and the DB counter started at 0.
+	s.logger.Info("submitter: reconcile chain state",
+		"id", rec.ID,
+		"sender", rec.SenderAddress,
+		"local_seq_used", localSeq,
+		"chain_seq", chainSeq,
+		"drift", int64(chainSeq)-int64(localSeq),
+	)
+
 	if err := s.queue.ReconcileSequence(ctx, rec.SenderAddress, chainSeq); err != nil {
 		s.logger.Error("submitter: reconcile sequence", "id", rec.ID, "error", err)
+	} else {
+		s.logger.Info("submitter: reconciled counter",
+			"sender", rec.SenderAddress,
+			"counter_raised_to_at_least", chainSeq,
+		)
 	}
 
 	// Re-queue all processing (claimed) records for this sender so they get
-	// fresh sequence numbers after the reconcile.
+	// fresh sequence numbers after the reconcile. See the invariant comment
+	// above for why requeueWithoutRelease is load-bearing here.
 	processing, lErr := s.queue.ListByStatus(ctx, store.StatusProcessing)
 	if lErr == nil {
 		for _, p := range processing {
 			if p.SenderAddress == rec.SenderAddress && p.ID != rec.ID {
-				s.requeueRecord(ctx, p)
+				s.requeueWithoutRelease(ctx, p)
 			}
 		}
 	}
 
-	hadSequence := rec.SequenceNumber != nil
 	rec.Status = store.StatusQueued
 	rec.SequenceNumber = nil
 	rec.AttemptCount++
@@ -556,10 +741,18 @@ func (s *Submitter) reconcileAndRequeue(ctx context.Context, rec *store.Transact
 	if err := s.queue.Update(ctx, rec); err != nil {
 		s.logger.Error("submitter: requeue after reconcile", "id", rec.ID, "error", err)
 	}
-	if hadSequence {
-		if err := s.queue.ReleaseSequence(ctx, rec.SenderAddress); err != nil {
-			s.logger.Error("submitter: release sequence after reconcile", "id", rec.ID, "error", err)
-		}
+}
+
+// requeueWithoutRelease is the reconcile-path variant of requeueRecord: it
+// clears sequence_number and flips the row back to queued, but does NOT
+// decrement the sender's sequence counter. See the comment in
+// reconcileAndRequeue for why releasing after a reconcile is incorrect.
+func (s *Submitter) requeueWithoutRelease(ctx context.Context, rec *store.TransactionRecord) {
+	rec.Status = store.StatusQueued
+	rec.SequenceNumber = nil
+	rec.UpdatedAt = time.Now().UTC()
+	if err := s.queue.Update(ctx, rec); err != nil {
+		s.logger.Error("submitter: requeue without release", "id", rec.ID, "error", err)
 	}
 }
 
@@ -589,6 +782,7 @@ func (s *Submitter) drainPipeline(ctx context.Context, ch <-chan signedItem, sen
 		s.logger.Error("submitter: drain parse chain seq", "sender", senderAddress, "error", err)
 		return
 	}
+	s.logger.Info("submitter: drain reconcile", "sender", senderAddress, "chain_seq", chainSeq)
 	if err := s.queue.ReconcileSequence(ctx, senderAddress, chainSeq); err != nil {
 		s.logger.Error("submitter: drain reconcile sequence", "sender", senderAddress, "error", err)
 	}

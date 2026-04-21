@@ -45,12 +45,14 @@ func (s *Store) Create(ctx context.Context, rec *store.TransactionRecord) error 
 			id, sender_address, wallet_id, fee_payer_wallet_id, fee_payer_address,
 			status, sequence_number, function_id, payload_json,
 			max_gas_amount, idempotency_key, txn_hash, error_message, webhook_url, attempt_count, last_error,
+			failure_kind, vm_status,
 			created_at, updated_at, expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ID, rec.SenderAddress, rec.WalletID, nullStr(rec.FeePayerWalletID), nullStr(rec.FeePayerAddress),
 		string(rec.Status), nullU64(rec.SequenceNumber),
 		rec.FunctionID, rec.PayloadJSON, maxGas, idemp, nullStr(rec.TxnHash),
 		nullStr(rec.ErrorMessage), nullStr(rec.WebhookURL), rec.AttemptCount, nullStr(rec.LastError),
+		nullStr(rec.FailureKind), nullStr(rec.VmStatus),
 		rec.CreatedAt, rec.UpdatedAt, rec.ExpiresAt,
 	)
 	if err != nil {
@@ -80,12 +82,14 @@ func (s *Store) Update(ctx context.Context, rec *store.TransactionRecord) error 
 			sender_address = ?, wallet_id = ?, fee_payer_wallet_id = ?, fee_payer_address = ?,
 			status = ?, sequence_number = ?, function_id = ?, payload_json = ?,
 			max_gas_amount = ?, idempotency_key = ?, txn_hash = ?, error_message = ?, webhook_url = ?,
-			attempt_count = ?, last_error = ?, updated_at = ?, expires_at = ?
+			attempt_count = ?, last_error = ?, failure_kind = ?, vm_status = ?,
+			updated_at = ?, expires_at = ?
 		WHERE id = ?`,
 		rec.SenderAddress, rec.WalletID, nullStr(rec.FeePayerWalletID), nullStr(rec.FeePayerAddress),
 		string(rec.Status), nullU64(rec.SequenceNumber),
 		rec.FunctionID, rec.PayloadJSON, maxGas, idemp, nullStr(rec.TxnHash),
 		nullStr(rec.ErrorMessage), nullStr(rec.WebhookURL), rec.AttemptCount, nullStr(rec.LastError),
+		nullStr(rec.FailureKind), nullStr(rec.VmStatus),
 		rec.UpdatedAt, rec.ExpiresAt, rec.ID,
 	)
 	if err != nil {
@@ -119,12 +123,14 @@ func (s *Store) UpdateIfStatus(ctx context.Context, rec *store.TransactionRecord
 			sender_address = ?, wallet_id = ?, fee_payer_wallet_id = ?, fee_payer_address = ?,
 			status = ?, sequence_number = ?, function_id = ?, payload_json = ?,
 			max_gas_amount = ?, idempotency_key = ?, txn_hash = ?, error_message = ?, webhook_url = ?,
-			attempt_count = ?, last_error = ?, updated_at = ?, expires_at = ?
+			attempt_count = ?, last_error = ?, failure_kind = ?, vm_status = ?,
+			updated_at = ?, expires_at = ?
 		WHERE id = ? AND status = ?`,
 		rec.SenderAddress, rec.WalletID, nullStr(rec.FeePayerWalletID), nullStr(rec.FeePayerAddress),
 		string(rec.Status), nullU64(rec.SequenceNumber),
 		rec.FunctionID, rec.PayloadJSON, maxGas, idemp, nullStr(rec.TxnHash),
 		nullStr(rec.ErrorMessage), nullStr(rec.WebhookURL), rec.AttemptCount, nullStr(rec.LastError),
+		nullStr(rec.FailureKind), nullStr(rec.VmStatus),
 		rec.UpdatedAt, rec.ExpiresAt, rec.ID, string(expected),
 	)
 	if err != nil {
@@ -144,6 +150,7 @@ func (s *Store) Get(ctx context.Context, id string) (*store.TransactionRecord, e
 			COALESCE(fee_payer_wallet_id, ''), COALESCE(fee_payer_address, ''),
 			COALESCE(payload_json, ''), sequence_number, max_gas_amount,
 			COALESCE(error_message, ''), COALESCE(webhook_url, ''), attempt_count, COALESCE(last_error, ''),
+			COALESCE(failure_kind, ''), COALESCE(vm_status, ''),
 			created_at, updated_at, expires_at, function_id
 		FROM transactions WHERE id = ?`, id)
 	return scanRecord(row)
@@ -159,6 +166,7 @@ func (s *Store) GetByIdempotencyKey(ctx context.Context, key string) (*store.Tra
 			COALESCE(fee_payer_wallet_id, ''), COALESCE(fee_payer_address, ''),
 			COALESCE(payload_json, ''), sequence_number, max_gas_amount,
 			COALESCE(error_message, ''), COALESCE(webhook_url, ''), attempt_count, COALESCE(last_error, ''),
+			COALESCE(failure_kind, ''), COALESCE(vm_status, ''),
 			created_at, updated_at, expires_at, function_id
 		FROM transactions WHERE idempotency_key = ?`, key)
 	return scanRecord(row)
@@ -171,6 +179,7 @@ func (s *Store) ListByStatus(ctx context.Context, status store.TxnStatus) ([]*st
 			COALESCE(fee_payer_wallet_id, ''), COALESCE(fee_payer_address, ''),
 			COALESCE(payload_json, ''), sequence_number, max_gas_amount,
 			COALESCE(error_message, ''), COALESCE(webhook_url, ''), attempt_count, COALESCE(last_error, ''),
+			COALESCE(failure_kind, ''), COALESCE(vm_status, ''),
 			created_at, updated_at, expires_at, function_id
 		FROM transactions WHERE status = ?`, string(status))
 	if err != nil {
@@ -201,6 +210,7 @@ func scanRecord(row *sql.Row) (*store.TransactionRecord, error) {
 		&rec.FeePayerWalletID, &rec.FeePayerAddress,
 		&payload, &seq, &maxGas,
 		&rec.ErrorMessage, &rec.WebhookURL, &rec.AttemptCount, &rec.LastError,
+		&rec.FailureKind, &rec.VmStatus,
 		&rec.CreatedAt, &rec.UpdatedAt, &rec.ExpiresAt, &rec.FunctionID,
 	)
 	rec.Status = store.TxnStatus(statusStr)
@@ -235,6 +245,7 @@ func scanRecordRows(rows *sql.Rows) (*store.TransactionRecord, error) {
 		&rec.FeePayerWalletID, &rec.FeePayerAddress,
 		&payload, &seq, &maxGas,
 		&rec.ErrorMessage, &rec.WebhookURL, &rec.AttemptCount, &rec.LastError,
+		&rec.FailureKind, &rec.VmStatus,
 		&rec.CreatedAt, &rec.UpdatedAt, &rec.ExpiresAt, &rec.FunctionID,
 	)
 	rec.Status = store.TxnStatus(statusStr)

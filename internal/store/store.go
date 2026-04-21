@@ -38,15 +38,23 @@ type TransactionRecord struct {
 	FeePayerAddress  string    `json:"fee_payer_address,omitempty"`
 	PayloadJSON      string    `json:"payload_json,omitempty"`
 	// SequenceNumber is set when the transaction is built for submit (Aptos account sequence).
-	SequenceNumber *uint64   `json:"sequence_number,omitempty"`
-	MaxGasAmount   *uint64   `json:"max_gas_amount,omitempty"`
-	ErrorMessage   string    `json:"error_message,omitempty"`
-	WebhookURL     string    `json:"webhook_url,omitempty"`
-	AttemptCount   int       `json:"attempt_count,omitempty"`
-	LastError      string    `json:"last_error,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
-	ExpiresAt      time.Time `json:"expires_at"`
+	SequenceNumber *uint64 `json:"sequence_number,omitempty"`
+	MaxGasAmount   *uint64 `json:"max_gas_amount,omitempty"`
+	ErrorMessage   string  `json:"error_message,omitempty"`
+	WebhookURL     string  `json:"webhook_url,omitempty"`
+	AttemptCount   int     `json:"attempt_count,omitempty"`
+	LastError      string  `json:"last_error,omitempty"`
+	// FailureKind categorizes why the transaction reached a terminal failure state.
+	// Populated by the submitter on markPermanentFailure; empty for non-failed rows.
+	// Values: "simulation", "submit", "expired", "validation", "signing", "assembly".
+	FailureKind string `json:"failure_kind,omitempty"`
+	// VmStatus is the Aptos VM's structured failure reason captured from the
+	// /transactions/simulate response (e.g. "Move abort … EINSUFFICIENT_BALANCE").
+	// Only set when simulation produced a VM result.
+	VmStatus  string    `json:"vm_status,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // QueuedPayload is stored in TransactionRecord.PayloadJSON for the worker to rebuild the entry function.

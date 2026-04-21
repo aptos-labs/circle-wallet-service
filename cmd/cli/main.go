@@ -51,11 +51,11 @@ func usage() {
 Usage: go run ./cmd/cli <command> [flags]
 
 Commands:
-  health                           Check server health
-  query    -f <function_id> ...    Call a view function
-  execute  -w <wallet_id|address> -f <function_id> ...    Submit a transaction
-  status   -id <transaction_id>    Get transaction status
-  watch    -id <transaction_id>    Poll until terminal status
+  health                                       Check server health
+  query    -f <function_id> ...                Call a view function
+  execute  -w <wallet_id> -addr <address> -f <function_id> ...   Submit a transaction
+  status   -id <transaction_id>                Get transaction status
+  watch    -id <transaction_id>                Poll until terminal status
 
 Global env vars:
   API_BASE_URL    Server URL (default http://localhost:8080)
@@ -70,7 +70,9 @@ Examples:
     -a "0xYOUR_ADDRESS"
 
   go run ./cmd/cli execute \
-    -w "circle-wallet-uuid-or-0xADDRESS" \
+    -w "circle-wallet-uuid" \
+    -addr "0xSENDER_ADDRESS" \
+    -pk "0xSENDER_PUBLIC_KEY" \          # optional — seeds pubkey cache
     -f "0x1::aptos_account::transfer" \
     -a "0xRECIPIENT" -a "100"
 
@@ -203,25 +205,40 @@ func cmdQuery() {
 }
 
 func cmdExecute() {
-	var walletID, functionID, webhookURL string
+	var walletID, address, publicKey, functionID, webhookURL string
+	var feePayerWalletID, feePayerAddress, feePayerPublicKey string
 	var typeArgs stringSlice
 	var args stringSlice
 	var maxGas uint64
 
 	fs := flag.NewFlagSet("execute", flag.ExitOnError)
-	fs.StringVar(&walletID, "w", "", "wallet_id or Aptos address")
+	fs.StringVar(&walletID, "w", "", "Circle wallet_id (required)")
+	fs.StringVar(&address, "addr", "", "Aptos sender address (required)")
+	fs.StringVar(&publicKey, "pk", "", "Ed25519 public key hex (optional; skips server-side Circle lookup)")
 	fs.StringVar(&functionID, "f", "", "function_id (e.g. 0x1::aptos_account::transfer)")
 	fs.Var(&typeArgs, "t", "type argument (repeatable)")
 	fs.Var(&args, "a", "argument (repeatable)")
 	fs.Uint64Var(&maxGas, "gas", 0, "max gas amount (0 = server default)")
 	fs.StringVar(&webhookURL, "webhook", "", "webhook URL for status callback")
+	fs.StringVar(&feePayerWalletID, "fp-w", "", "fee-payer Circle wallet_id (optional)")
+	fs.StringVar(&feePayerAddress, "fp-addr", "", "fee-payer Aptos address (required if -fp-w set)")
+	fs.StringVar(&feePayerPublicKey, "fp-pk", "", "fee-payer Ed25519 public key hex (optional)")
 	err := fs.Parse(os.Args[1:])
 	if err != nil {
 		os.Exit(1)
 	}
 
-	if walletID == "" || functionID == "" {
-		_, err2 := fmt.Fprintln(os.Stderr, "Error: -w (wallet_id) and -f (function_id) are required")
+	if walletID == "" || address == "" || functionID == "" {
+		_, err2 := fmt.Fprintln(os.Stderr, "Error: -w (wallet_id), -addr (address), and -f (function_id) are required")
+		if err2 != nil {
+			os.Exit(1)
+		}
+		fs.Usage()
+		os.Exit(1)
+	}
+	// Fee-payer flags are all-or-nothing; mismatched flags are a common user error.
+	if (feePayerWalletID != "") != (feePayerAddress != "") {
+		_, err2 := fmt.Fprintln(os.Stderr, "Error: -fp-w and -fp-addr must be set together")
 		if err2 != nil {
 			os.Exit(1)
 		}
@@ -236,9 +253,23 @@ func cmdExecute() {
 
 	reqBody := map[string]any{
 		"wallet_id":      walletID,
+		"address":        address,
 		"function_id":    functionID,
 		"type_arguments": []string(typeArgs),
 		"arguments":      anyArgs,
+	}
+	if publicKey != "" {
+		reqBody["public_key"] = publicKey
+	}
+	if feePayerWalletID != "" {
+		fp := map[string]any{
+			"wallet_id": feePayerWalletID,
+			"address":   feePayerAddress,
+		}
+		if feePayerPublicKey != "" {
+			fp["public_key"] = feePayerPublicKey
+		}
+		reqBody["fee_payer"] = fp
 	}
 	if maxGas > 0 {
 		reqBody["max_gas_amount"] = maxGas

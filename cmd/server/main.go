@@ -98,7 +98,7 @@ func run(logger *slog.Logger) error {
 		logger.Warn("APTOS_NODE_URL not configured; query endpoint will not work")
 	}
 
-	notifier := webhook.NewNotifier(cfg.WebhookURL(), memStore, logger)
+	notifier := webhook.NewWebhookNotifier(cfg.WebhookURL(), memStore, logger)
 
 	webhookWorker := webhook.NewWorker(
 		memStore,
@@ -134,7 +134,7 @@ func run(logger *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	if aptosClient != nil && circleSigner != nil {
-		mux.HandleFunc("POST /v1/execute", handler2.Execute(cfg, memStore, logger))
+		mux.HandleFunc("POST /v1/execute", handler2.Execute(cfg, memStore, pubkeyCache, logger))
 	} else {
 		mux.HandleFunc("POST /v1/execute", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
