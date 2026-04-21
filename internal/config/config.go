@@ -292,6 +292,12 @@ func (c *Config) validate() error {
 	if c.AptosChainID() == 0 {
 		return fmt.Errorf("APTOS_CHAIN_ID must be greater than 0")
 	}
+	// Per-wallet rate limiting is not yet implemented; the middleware only
+	// enforces a global token bucket. Accepting rate_limit.per_wallet=true
+	// would silently no-op, so reject it explicitly until the feature lands.
+	if c.RateLimit.PerWallet {
+		return fmt.Errorf("rate_limit.per_wallet is not yet implemented; leave it false")
+	}
 	return nil
 }
 
