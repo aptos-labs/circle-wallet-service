@@ -206,7 +206,7 @@ func cmdQuery() {
 
 func cmdExecute() {
 	var walletID, address, publicKey, functionID, webhookURL string
-	var feePayerWalletID, feePayerAddress, feePayerPublicKey string
+	var feePayerWalletID, feePayerAddress, feePayerPublicKey, idempotencyKey string
 	var typeArgs stringSlice
 	var args stringSlice
 	var maxGas uint64
@@ -223,6 +223,7 @@ func cmdExecute() {
 	fs.StringVar(&feePayerWalletID, "fp-w", "", "fee-payer Circle wallet_id (optional)")
 	fs.StringVar(&feePayerAddress, "fp-addr", "", "fee-payer Aptos address (required if -fp-w set)")
 	fs.StringVar(&feePayerPublicKey, "fp-pk", "", "fee-payer Ed25519 public key hex (optional)")
+	fs.StringVar(&idempotencyKey, "ik", "", "idempotency key (optional)")
 	err := fs.Parse(os.Args[1:])
 	if err != nil {
 		os.Exit(1)
@@ -252,11 +253,12 @@ func cmdExecute() {
 	}
 
 	reqBody := map[string]any{
-		"wallet_id":      walletID,
-		"address":        address,
-		"function_id":    functionID,
-		"type_arguments": []string(typeArgs),
-		"arguments":      anyArgs,
+		"wallet_id":       walletID,
+		"address":         address,
+		"function_id":     functionID,
+		"type_arguments":  []string(typeArgs),
+		"arguments":       anyArgs,
+		"idempotency_key": idempotencyKey,
 	}
 	if publicKey != "" {
 		reqBody["public_key"] = publicKey
