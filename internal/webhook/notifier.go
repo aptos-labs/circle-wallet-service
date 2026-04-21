@@ -49,7 +49,7 @@ type DebugNotifier struct {
 }
 
 func NewDebugNotifier(logger *slog.Logger) Notifier {
-	return &WebHookNotifier{
+	return &DebugNotifier{
 		logger: logger,
 	}
 }
