@@ -29,13 +29,21 @@ func NewMemoryStore(ttl time.Duration) *MemoryStore {
 	return s
 }
 
-// Create stores a new transaction record.
+// Create stores a new transaction record. Validation is performed first so that
+// a conflict leaves the store unchanged, matching MySQL's UNIQUE-constraint
+// behavior: a rejected insert never makes the row visible to subsequent reads.
 func (s *MemoryStore) Create(_ context.Context, rec *TransactionRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if _, exists := s.records[rec.ID]; exists {
 		return fmt.Errorf("record with id %q already exists", rec.ID)
+	}
+
+	if rec.IdempotencyKey != "" {
+		if _, exists := s.idempotencyIdx[rec.IdempotencyKey]; exists {
+			return fmt.Errorf("%w", ErrIdempotencyConflict)
+		}
 	}
 
 	now := time.Now()
@@ -45,16 +53,15 @@ func (s *MemoryStore) Create(_ context.Context, rec *TransactionRecord) error {
 	s.records[rec.ID] = &cp
 
 	if cp.IdempotencyKey != "" {
-		if _, exists := s.idempotencyIdx[cp.IdempotencyKey]; exists {
-			return fmt.Errorf("%w", ErrIdempotencyConflict)
-		}
 		s.idempotencyIdx[cp.IdempotencyKey] = cp.ID
 	}
 
 	return nil
 }
 
-// Update replaces an existing record.
+// Update replaces an existing record. If the new IdempotencyKey is currently
+// owned by a different record, the update is rejected to mirror the MySQL
+// schema's UNIQUE(idempotency_key) constraint.
 func (s *MemoryStore) Update(_ context.Context, rec *TransactionRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -62,6 +69,12 @@ func (s *MemoryStore) Update(_ context.Context, rec *TransactionRecord) error {
 	old, exists := s.records[rec.ID]
 	if !exists {
 		return fmt.Errorf("record with id %q not found", rec.ID)
+	}
+
+	if rec.IdempotencyKey != "" {
+		if owner, taken := s.idempotencyIdx[rec.IdempotencyKey]; taken && owner != rec.ID {
+			return fmt.Errorf("%w", ErrIdempotencyConflict)
+		}
 	}
 
 	if old.IdempotencyKey != "" && old.IdempotencyKey != rec.IdempotencyKey {
@@ -91,6 +104,12 @@ func (s *MemoryStore) UpdateIfStatus(_ context.Context, rec *TransactionRecord, 
 	old, exists := s.records[rec.ID]
 	if !exists || old.Status != expected {
 		return false, nil
+	}
+
+	if rec.IdempotencyKey != "" {
+		if owner, taken := s.idempotencyIdx[rec.IdempotencyKey]; taken && owner != rec.ID {
+			return false, fmt.Errorf("%w", ErrIdempotencyConflict)
+		}
 	}
 
 	if old.IdempotencyKey != "" && old.IdempotencyKey != rec.IdempotencyKey {
