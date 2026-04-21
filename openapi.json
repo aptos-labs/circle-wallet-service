@@ -1,9 +1,9 @@
 {
   "openapi": "3.0.3",
   "info": {
-    "title": "Contract API",
-    "version": "2.0.0",
-    "description": "Generic REST API for interacting with Aptos Move contracts.\n\n## Endpoints\n\n- **POST /v1/execute** — Enqueue an entry function transaction (returns `202` with `queued`)\n- **POST /v1/query** — Call a view function (sync)\n- **GET /v1/transactions/{id}** — Poll transaction status\n\n## Async Submission Model\n\nExecute requests return `202 Accepted` with a `transaction_id` and `status: queued`. A background worker signs and submits to Aptos in FIFO order per sender. Use `GET /v1/transactions/{id}` to poll until `submitted` or `confirmed`.\n\n### Transaction Lifecycle\n\n1. **queued** — Persisted in MySQL, waiting for the submitter\n2. **processing** — Claimed by a worker (build/sign/submit in progress)\n3. **submitted** — Sent to the Aptos blockchain, awaiting confirmation\n4. **confirmed** — Successfully committed on-chain\n5. **failed** — Submission or confirmation failed (may be retried)\n6. **expired** — Transaction expired before confirmation\n\n## Authentication\n\nAll endpoints except `/v1/health` and `/v1/openapi.yaml` require an API key passed in the `Authorization` header. Requests without a valid key receive `401 Unauthorized`.\n\n## Error Handling\n\nErrors return a JSON body with a single `error` field:\n```json\n{\"error\": \"description of the problem\"}\n```\n\n## Arguments\n\nArguments are untyped (strings, numbers, arrays) — matching the native Aptos REST API convention. The server resolves argument types by fetching the module ABI from the Aptos node (cached per module) and handles BCS serialization automatically.\n\nSupported Move types: `address`, `bool`, `u8`–`u256`, `0x1::string::String`, `vector\u003cT\u003e`, `0x1::object::Object\u003cT\u003e`.\n\n## Address Format\n\nAll address parameters accept Aptos account addresses as hex strings (e.g., `0x1`). Addresses are validated on the server side; invalid addresses return `400 Bad Request`.\n\n## Request Validation\n\n- Request bodies must be valid JSON with `Content-Type: application/json`\n- Unknown fields in the request body are rejected (`400 Bad Request`)\n- Missing required fields return `400 Bad Request` with a descriptive message"
+    "title": "Aptos Contract API",
+    "version": "2.1.0",
+    "description": "REST API for submitting and tracking Aptos Move transactions. Signing is delegated to Circle Programmable Wallets. Wallet IDs and addresses are supplied per-request — the server holds no wallet state in its config.\n\n## Endpoints\n\n- **POST /v1/execute** — Enqueue an entry function transaction (returns `202` with `status: queued`)\n- **POST /v1/query** — Call a view function (sync)\n- **GET /v1/transactions/{id}** — Poll transaction status\n- **GET /v1/transactions/{id}/webhooks** — List webhook delivery attempts for a transaction\n- **GET /v1/health** — Health check (no auth; `?deep=1` also pings MySQL)\n\n## Async Submission Model\n\n`POST /v1/execute` returns `202 Accepted` with a `transaction_id` and `status: queued`. A background worker per sender address claims the row (allocating an Aptos sequence number atomically), signs via Circle, and submits to the Aptos node. Use `GET /v1/transactions/{id}` to poll until a terminal status.\n\n### Transaction Lifecycle\n\n1. **queued** — Persisted in MySQL, waiting for a sender-specific worker\n2. **processing** — Claimed by a worker; sequence number allocated, signing in progress\n3. **submitted** — Sent to the Aptos node; `txn_hash` populated; awaiting confirmation\n4. **confirmed** — Successfully committed on-chain (terminal)\n5. **failed** — Simulation, submit, or on-chain execution rejected the transaction (terminal)\n6. **expired** — Transaction's on-chain expiration passed before confirmation (terminal)\n\nTransient failures (network blips, Circle 5xx, sequence-number mismatch) requeue the row automatically; `attempt_count` is incremented. Only permanent failures reach `failed` or `expired`.\n\n## Authentication\n\nAll endpoints except `/v1/health` require an API key. Pass it either as:\n\n- `Authorization: Bearer <API_KEY>`\n- `X-API-Key: <API_KEY>`\n\nComparison uses constant-time equality. Requests without a valid key receive `401 Unauthorized`.\n\n## Idempotency\n\n`POST /v1/execute` accepts an `idempotency_key` (body field) or `Idempotency-Key` (header). If a record with that key already exists, the handler replays the prior response with `X-Idempotency-Replayed: true` in the response headers; no new transaction is created.\n\n## Error Handling\n\nAll 4xx and 5xx responses return a JSON body with a single `error` field:\n\n```json\n{\"error\": \"description of the problem\"}\n```\n\n## Arguments\n\nArguments are untyped JSON values (strings, numbers, arrays). The server resolves Move types by fetching the module ABI from the Aptos node (cached) and handles BCS serialization automatically.\n\nSupported Move types: `address`, `bool`, `u8`\u2013`u256`, `0x1::string::String`, `vector<T>`, `0x1::object::Object<T>`.\n\n## Address Format\n\nAddresses accept short or long hex (e.g. `0x1` or `0x0000...0001`). They're canonicalized to long-form internally so per-sender queues and sequence counters are consistent regardless of input format.\n\n## Request Validation\n\n- Request bodies must be valid JSON with `Content-Type: application/json`\n- Request bodies are limited to 1 MB\n- Unknown fields in the request body are rejected (`400 Bad Request`)\n- Missing required fields return `400 Bad Request` with a descriptive message"
   },
   "tags": [
     {
@@ -16,7 +16,7 @@
     },
     {
       "name": "Transactions",
-      "description": "Track transaction status"
+      "description": "Track transaction status and webhook delivery history"
     },
     {
       "name": "Health",
@@ -28,9 +28,20 @@
       "post": {
         "operationId": "executeContract",
         "summary": "Execute an entry function",
-        "description": "Submits a transaction calling the specified Move entry function. Arguments are untyped — the server resolves types from the on-chain module ABI and handles BCS serialization. Returns 202 with a transaction_id for polling.\n\n**Example: Mint tokens**\n```json\n{\n  \"function_id\": \"0x1234::contractInt::mint\",\n  \"type_arguments\": [],\n  \"arguments\": [\"0x5678abcd...\", \"10000\"],\n  \"signer\": \"minter\",\n  \"max_gas_amount\": 200000\n}\n```",
+        "description": "Enqueues a transaction calling the specified Move entry function. Arguments are untyped \u2014 the server resolves types from the on-chain module ABI and handles BCS serialization. Returns 202 with a `transaction_id` for polling. Signing and submission happen asynchronously in a per-sender worker.\n\n**Example: Self-paid transfer**\n```json\n{\n  \"wallet_id\": \"c1ab2c3d-...\",\n  \"address\": \"0xSENDER\",\n  \"function_id\": \"0x1::aptos_account::transfer\",\n  \"type_arguments\": [],\n  \"arguments\": [\"0xRECIPIENT\", \"100\"],\n  \"max_gas_amount\": 200000\n}\n```\n\n**Example: Fee-payer (gas sponsorship)**\n```json\n{\n  \"wallet_id\": \"sender-wallet-uuid\",\n  \"address\": \"0xSENDER\",\n  \"function_id\": \"0x1::coin::transfer\",\n  \"type_arguments\": [\"0x1::aptos_coin::AptosCoin\"],\n  \"arguments\": [\"0xRECIPIENT\", \"100\"],\n  \"fee_payer\": {\n    \"wallet_id\": \"gas-station-wallet-uuid\",\n    \"address\": \"0xGAS_STATION\"\n  }\n}\n```",
         "tags": [
           "Execute"
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional idempotency key. Alternative to the `idempotency_key` body field; the body field takes precedence when both are supplied.",
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
         "requestBody": {
           "required": true,
@@ -45,7 +56,16 @@
         },
         "responses": {
           "202": {
-            "description": "Transaction accepted and queued for submission",
+            "description": "Transaction accepted and queued for submission. If the `X-Idempotency-Replayed` response header is `true`, the body is a replay of a prior response for the same idempotency key and `txn_hash`/`sequence_number` may be populated if the prior transaction has progressed.",
+            "headers": {
+              "X-Idempotency-Replayed": {
+                "description": "Present and set to `true` when this response is a replay of a prior request with the same idempotency key.",
+                "schema": {
+                  "type": "string",
+                  "enum": ["true"]
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -55,7 +75,7 @@
             }
           },
           "400": {
-            "description": "Invalid request (bad function_id format, wrong argument count, unsupported type, etc.)",
+            "description": "Invalid request (bad function_id format, unknown fields, missing required fields, unsafe webhook URL, address/public-key mismatch, etc.)",
             "content": {
               "application/json": {
                 "schema": {
@@ -74,8 +94,28 @@
               }
             }
           },
+          "429": {
+            "description": "Rate limit exceeded (only when rate limiting is enabled). Honour the `Retry-After` response header.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
-            "description": "Internal server error (ABI fetch failure, signing error, etc.)",
+            "description": "Internal server error (failed to persist the queued transaction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Execute endpoint is not configured because Circle or Aptos credentials are missing",
             "content": {
               "application/json": {
                 "schema": {
@@ -91,7 +131,7 @@
       "post": {
         "operationId": "queryContract",
         "summary": "Call a view function",
-        "description": "Calls a Move view function and returns the result synchronously. The request is proxied to the Aptos node's /view endpoint, which handles ABI resolution and argument serialization internally.\n\n**Example: Check balance**\n```json\n{\n  \"function_id\": \"0x1234::contractInt::balance_of\",\n  \"type_arguments\": [],\n  \"arguments\": [\"0x5678abcd...\"]\n}\n```\n\nReturns: `{\"result\": [\"10000\"]}`",
+        "description": "Calls a Move view function and returns the result synchronously. The server resolves Move argument types from the module ABI, BCS-serializes the arguments, and proxies the call to the Aptos node's `/view` endpoint.\n\n**Example: Balance lookup**\n```json\n{\n  \"function_id\": \"0x1::coin::balance\",\n  \"type_arguments\": [\"0x1::aptos_coin::AptosCoin\"],\n  \"arguments\": [\"0xYOUR_ADDRESS\"]\n}\n```\n\nReturns: `{\"result\": [\"10000\"]}`",
         "tags": [
           "Query"
         ],
@@ -118,7 +158,7 @@
             }
           },
           "400": {
-            "description": "Invalid request or Aptos view function error (bad function_id, wrong args, on-chain abort, etc.)",
+            "description": "Invalid request (bad function_id, argument count mismatch, unsupported type, unresolvable ABI, etc.)",
             "content": {
               "application/json": {
                 "schema": {
@@ -138,7 +178,17 @@
             }
           },
           "502": {
-            "description": "Aptos node unreachable or returned an unexpected error",
+            "description": "Aptos node unreachable or view call returned an error (e.g. on-chain abort).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Query endpoint is not configured because Aptos credentials are missing",
             "content": {
               "application/json": {
                 "schema": {
@@ -150,33 +200,39 @@
         }
       }
     },
-    "/v1/docs": {
-      "get": {
-        "operationId": "apiDocs",
-        "summary": "Interactive API documentation",
-        "description": "Serves an interactive API documentation page powered by Scalar, which reads from the OpenAPI spec at /v1/openapi.yaml.",
-        "tags": [
-          "Health"
-        ],
-        "responses": {
-          "200": {
-            "description": "HTML page with interactive API documentation"
-          }
-        },
-        "security": []
-      }
-    },
     "/v1/health": {
       "get": {
         "operationId": "healthCheck",
         "summary": "Health check",
-        "description": "Returns the server health status. This endpoint does not require authentication.",
+        "description": "Returns the server health status. No authentication required. Pass `?deep=1` to also verify MySQL connectivity \u2014 useful for readiness probes.",
         "tags": [
           "Health"
         ],
+        "parameters": [
+          {
+            "name": "deep",
+            "in": "query",
+            "required": false,
+            "description": "When set to `1`, the server additionally pings MySQL and returns 500 if the database is unreachable.",
+            "schema": {
+              "type": "string",
+              "enum": ["1"]
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Server is healthy",
+            "description": "Server is healthy (and MySQL is reachable when `?deep=1`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server is up but MySQL is unreachable (only returned when `?deep=1` is set).",
             "content": {
               "application/json": {
                 "schema": {
@@ -193,7 +249,7 @@
       "get": {
         "operationId": "getTransaction",
         "summary": "Get transaction status",
-        "description": "Returns the current status and details of a previously submitted transaction. Use this endpoint to poll for transaction confirmation after calling the execute endpoint. Terminal statuses are: confirmed, failed, expired, permanently_failed.",
+        "description": "Returns the current status and metadata for a previously submitted transaction. Use this endpoint to poll for confirmation after calling `/v1/execute`. Terminal statuses are `confirmed`, `failed`, and `expired`.",
         "tags": [
           "Transactions"
         ],
@@ -202,7 +258,7 @@
             "name": "id",
             "in": "path",
             "required": true,
-            "description": "Transaction ID (UUID) returned by the execute endpoint",
+            "description": "Transaction ID (UUID) returned by `/v1/execute`",
             "schema": {
               "type": "string",
               "format": "uuid"
@@ -221,7 +277,7 @@
             }
           },
           "400": {
-            "description": "Missing or empty transaction ID",
+            "description": "Missing transaction ID",
             "content": {
               "application/json": {
                 "schema": {
@@ -262,6 +318,73 @@
           }
         }
       }
+    },
+    "/v1/transactions/{id}/webhooks": {
+      "get": {
+        "operationId": "listTransactionWebhookDeliveries",
+        "summary": "List webhook delivery attempts",
+        "description": "Returns the persistent webhook outbox entries for a transaction, in creation order. Useful for auditing delivery retries and debugging failed notifications. Returns an empty array if no webhook was configured for the transaction or no deliveries have been attempted yet.",
+        "tags": [
+          "Transactions"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Transaction ID (UUID)",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Delivery records (possibly empty)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WebhookDeliveryRecord"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing transaction ID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error (database failure)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -273,87 +396,139 @@
           "error": {
             "type": "string",
             "description": "Human-readable error description",
-            "example": "invalid function_id: expected format addr::module::function"
+            "example": "function_id must be in format <address>::<module>::<function>"
           }
-        }
+        },
+        "required": ["error"]
       },
       "ExecuteRequest": {
         "type": "object",
-        "description": "Request body for executing a Move entry function as a blockchain transaction.",
+        "description": "Request body for enqueuing an entry function transaction. Signing and submission happen asynchronously \u2014 a 202 only means the row is persisted.",
         "properties": {
-          "arguments": {
-            "type": "array",
-            "description": "Function arguments as untyped values (strings, numbers, arrays). The server resolves the expected types from the on-chain module ABI and serializes via BCS.",
-            "items": {
-              "description": "Argument value — type is inferred from the on-chain ABI"
-            }
+          "wallet_id": {
+            "type": "string",
+            "description": "Circle wallet identifier that will sign the transaction.",
+            "example": "c1ab2c3d-e4f5-6789-abcd-ef0123456789"
+          },
+          "address": {
+            "type": "string",
+            "description": "Aptos account address corresponding to `wallet_id`. Short or long hex both accepted; canonicalized to long-form internally.",
+            "example": "0x1234abcd..."
+          },
+          "public_key": {
+            "type": "string",
+            "description": "Optional Ed25519 public key (0x-prefixed hex). When provided, the server verifies `authkey(public_key) == address` and seeds its internal public-key cache, saving a Circle round-trip on first use. A mismatch returns 400.",
+            "example": "0xabcdef..."
           },
           "function_id": {
             "type": "string",
-            "description": "Fully qualified Move function ID in the format addr::module::function",
-            "example": "0x1234::contractInt::mint"
+            "description": "Fully qualified Move function ID in the format `<address>::<module>::<function>`.",
+            "example": "0x1::aptos_account::transfer"
+          },
+          "type_arguments": {
+            "type": "array",
+            "description": "Move type arguments for generic functions (e.g. `[\"0x1::aptos_coin::AptosCoin\"]`). Omit or pass `[]` when the function has no type parameters.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "arguments": {
+            "type": "array",
+            "description": "Function arguments as untyped JSON values. The server resolves expected Move types from the on-chain ABI and BCS-serializes each value at submit time.",
+            "items": {
+              "description": "Argument value \u2014 type is inferred from the on-chain ABI"
+            }
           },
           "max_gas_amount": {
             "type": "integer",
             "format": "uint64",
-            "description": "Optional gas limit override for this transaction. If omitted, the server's default max_gas_amount is used."
+            "description": "Optional gas limit override. Defaults to the server's configured `MAX_GAS_AMOUNT`."
           },
-          "signer": {
+          "webhook_url": {
             "type": "string",
-            "description": "Name of the configured signer role to sign the transaction (e.g., minter, owner, denylister)",
-            "example": "minter"
+            "format": "uri",
+            "description": "Optional per-request webhook URL invoked when the transaction reaches a terminal status. Subject to SSRF validation (no private, loopback, or link-local addresses). Takes precedence over the server-wide `WEBHOOK_URL`."
           },
-          "type_arguments": {
-            "type": "array",
-            "description": "Move type arguments for generic functions (e.g., [\"0x1::aptos_coin::AptosCoin\"]). Pass an empty array if the function has no type parameters.",
-            "items": {
-              "type": "string"
-            }
+          "idempotency_key": {
+            "type": "string",
+            "description": "Optional idempotency key. If a prior request with the same key exists, its response is replayed with `X-Idempotency-Replayed: true`. The body field takes precedence over the `Idempotency-Key` request header."
+          },
+          "fee_payer": {
+            "$ref": "#/components/schemas/FeePayer"
           }
         },
         "required": [
-          "function_id",
-          "signer"
-        ]
+          "wallet_id",
+          "address",
+          "function_id"
+        ],
+        "additionalProperties": false
+      },
+      "FeePayer": {
+        "type": "object",
+        "description": "Optional fee-payer (gas station) wallet that sponsors gas for the transaction. When present, the server assembles a fee-payer transaction and collects two Circle signatures (sender and fee payer).",
+        "properties": {
+          "wallet_id": {
+            "type": "string",
+            "description": "Circle wallet identifier for the fee payer."
+          },
+          "address": {
+            "type": "string",
+            "description": "Aptos account address for the fee payer."
+          },
+          "public_key": {
+            "type": "string",
+            "description": "Optional Ed25519 public key (0x-prefixed hex) for the fee payer, same semantics as the top-level `public_key`."
+          }
+        },
+        "required": ["wallet_id", "address"],
+        "additionalProperties": false
       },
       "HealthResponse": {
         "type": "object",
-        "description": "Health check response indicating server status.",
+        "description": "Health check response.",
         "properties": {
           "status": {
             "type": "string",
-            "description": "Server health status",
+            "description": "Overall server status.",
+            "enum": ["ok", "error"],
+            "example": "ok"
+          },
+          "db": {
+            "type": "string",
+            "description": "Database connectivity, only present when `?deep=1` was set.",
+            "enum": ["ok", "unreachable"],
             "example": "ok"
           }
-        }
+        },
+        "required": ["status"]
       },
       "QueryRequest": {
         "type": "object",
-        "description": "Request body for calling a Move view function (read-only, no transaction).",
+        "description": "Request body for calling a Move view function (read-only, no transaction submission).",
         "properties": {
-          "arguments": {
-            "type": "array",
-            "description": "View function arguments as untyped values. The Aptos node resolves types from the on-chain ABI.",
-            "items": {
-              "description": "Argument value — type is inferred by the Aptos node"
-            }
-          },
           "function_id": {
             "type": "string",
-            "description": "Fully qualified Move view function ID in the format addr::module::function",
-            "example": "0x1234::contractInt::balance_of"
+            "description": "Fully qualified Move view function ID in the format `<address>::<module>::<function>`.",
+            "example": "0x1::coin::balance"
           },
           "type_arguments": {
             "type": "array",
-            "description": "Move type arguments for generic view functions. Pass an empty array if the function has no type parameters.",
+            "description": "Move type arguments for generic view functions. Omit or pass `[]` when the function has no type parameters.",
             "items": {
               "type": "string"
             }
+          },
+          "arguments": {
+            "type": "array",
+            "description": "View function arguments as untyped JSON values. The server resolves Move types from the on-chain ABI and BCS-serializes each value.",
+            "items": {
+              "description": "Argument value \u2014 type is inferred from the on-chain ABI"
+            }
           }
         },
-        "required": [
-          "function_id"
-        ]
+        "required": ["function_id"],
+        "additionalProperties": false
       },
       "QueryResponse": {
         "type": "object",
@@ -361,76 +536,65 @@
         "properties": {
           "result": {
             "type": "array",
-            "description": "View function return values as a JSON array. Element types depend on the Move function's return signature (e.g., [\"10000\"] for a u64 return).",
+            "description": "View function return values as a JSON array. Element types follow the Move return signature (e.g. `[\"10000\"]` for a `u64`).",
             "items": {
-              "description": "Return value — type depends on the Move function signature"
+              "description": "Return value \u2014 type depends on the Move function signature"
             }
           }
-        }
+        },
+        "required": ["result"]
       },
       "SubmitResponse": {
         "type": "object",
-        "description": "Response returned when a transaction is accepted for processing.",
+        "description": "Response returned when a transaction is accepted by `/v1/execute`. For an idempotent replay the body can additionally include `txn_hash` and `sequence_number` if the prior transaction has progressed past the `queued` state.",
         "properties": {
-          "status": {
-            "type": "string",
-            "description": "Initial transaction status after enqueue (always \"queued\" until the submitter runs)",
-            "example": "queued"
-          },
           "transaction_id": {
             "type": "string",
             "format": "uuid",
-            "description": "Unique identifier for tracking the transaction via GET /v1/transactions/{id}",
+            "description": "Unique identifier for tracking the transaction via `/v1/transactions/{id}`",
             "example": "550e8400-e29b-41d4-a716-446655440000"
-          }
-        }
-      },
-      "TransactionRecord": {
-        "type": "object",
-        "description": "Full record of a submitted transaction, including its current lifecycle status.",
-        "properties": {
-          "attempt": {
-            "type": "integer",
-            "description": "Current attempt number (0-indexed). Incremented on each automatic retry."
           },
-          "created_at": {
+          "status": {
             "type": "string",
-            "format": "date-time",
-            "description": "Timestamp when the transaction was first accepted by the API"
+            "description": "Status of the transaction record. `queued` for a new submission; may reflect later states (e.g. `submitted`, `confirmed`) on an idempotent replay.",
+            "enum": [
+              "queued",
+              "processing",
+              "submitted",
+              "confirmed",
+              "failed",
+              "expired"
+            ],
+            "example": "queued"
           },
-          "error_message": {
+          "txn_hash": {
             "type": "string",
-            "description": "Error message from the most recent failure, if any"
-          },
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "Unique transaction identifier assigned by the API"
-          },
-          "max_retries": {
-            "type": "integer",
-            "description": "Maximum number of retry attempts before the transaction is marked permanently_failed"
+            "description": "On-chain transaction hash. Only populated on idempotent replays where the prior submission has already reached `submitted` or later."
           },
           "sequence_number": {
             "type": "integer",
             "format": "uint64",
-            "description": "Aptos account sequence number used when the transaction was built (set after submission)"
-          },
-          "operation_type": {
+            "description": "Aptos account sequence number allocated to the transaction. Only populated on idempotent replays where the prior submission has already been claimed."
+          }
+        },
+        "required": ["transaction_id", "status"]
+      },
+      "TransactionRecord": {
+        "type": "object",
+        "description": "Full record of a transaction enqueued via `/v1/execute`, including its current lifecycle status.",
+        "properties": {
+          "id": {
             "type": "string",
-            "description": "The type of operation (e.g., \"execute\")"
+            "format": "uuid",
+            "description": "Unique transaction identifier assigned by the API."
           },
-          "request_payload": {
+          "idempotency_key": {
             "type": "string",
-            "description": "Original JSON request body stored for audit logging and transaction resubmission"
-          },
-          "sender_address": {
-            "type": "string",
-            "description": "Aptos account address of the signer who submitted the transaction"
+            "description": "Idempotency key stored with the record, if one was provided on `/v1/execute`."
           },
           "status": {
             "type": "string",
-            "description": "Current lifecycle status of the transaction",
+            "description": "Current lifecycle status.",
             "enum": [
               "queued",
               "processing",
@@ -442,26 +606,173 @@
           },
           "txn_hash": {
             "type": "string",
-            "description": "On-chain transaction hash (populated after submission to the Aptos node)"
+            "description": "On-chain transaction hash. Populated once the record reaches `submitted`."
+          },
+          "sender_address": {
+            "type": "string",
+            "description": "Canonical long-form Aptos address of the signer."
+          },
+          "function_id": {
+            "type": "string",
+            "description": "`<address>::<module>::<function>` called by this transaction."
+          },
+          "wallet_id": {
+            "type": "string",
+            "description": "Circle wallet identifier that signs the transaction."
+          },
+          "fee_payer_wallet_id": {
+            "type": "string",
+            "description": "Circle wallet identifier of the fee payer (only set when `/v1/execute` supplied `fee_payer`)."
+          },
+          "fee_payer_address": {
+            "type": "string",
+            "description": "Canonical long-form Aptos address of the fee payer (only set when `/v1/execute` supplied `fee_payer`)."
+          },
+          "payload_json": {
+            "type": "string",
+            "description": "JSON-encoded `{type_arguments, arguments}` payload the submitter rebuilds the entry function from. Stored as a string for audit."
+          },
+          "sequence_number": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "Aptos account sequence number allocated at claim time. NULL while the record is `queued`."
+          },
+          "max_gas_amount": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "Optional max gas override supplied on `/v1/execute`."
+          },
+          "webhook_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Per-request webhook URL supplied on `/v1/execute`."
+          },
+          "error_message": {
+            "type": "string",
+            "description": "Error message from the most recent failure, if any."
+          },
+          "attempt_count": {
+            "type": "integer",
+            "description": "Number of times this record has been retried by the submitter."
+          },
+          "last_error": {
+            "type": "string",
+            "description": "Last observed retry error (may be transient). Cleared on successful submission."
+          },
+          "failure_kind": {
+            "type": "string",
+            "description": "Category of permanent failure. Only set when `status` is `failed` or `expired`.",
+            "enum": [
+              "simulation",
+              "submit",
+              "expired",
+              "validation",
+              "signing",
+              "assembly"
+            ]
+          },
+          "vm_status": {
+            "type": "string",
+            "description": "Structured VM status from the Aptos `/transactions/simulate` response when simulation produced a reject (e.g. `Move abort ... EINSUFFICIENT_BALANCE`)."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the record was first accepted by the API. Also the per-sender FIFO ordering key."
           },
           "updated_at": {
             "type": "string",
             "format": "date-time",
-            "description": "Timestamp of the most recent status update"
+            "description": "Timestamp of the most recent state change."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Transaction expiration time (`created_at + TXN_EXPIRATION_SECONDS`). The submitter marks the record `expired` if this passes before submission."
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "sender_address",
+          "function_id",
+          "wallet_id",
+          "created_at",
+          "updated_at",
+          "expires_at"
+        ]
+      },
+      "WebhookDeliveryRecord": {
+        "type": "object",
+        "description": "A single webhook delivery attempt recorded in the persistent outbox. Field names are serialized from the struct field names (Go default), not snake_case.",
+        "properties": {
+          "ID": {
+            "type": "string",
+            "description": "Delivery record identifier."
+          },
+          "TransactionID": {
+            "type": "string",
+            "description": "ID of the transaction the delivery is for."
+          },
+          "URL": {
+            "type": "string",
+            "format": "uri",
+            "description": "Destination webhook URL."
+          },
+          "Payload": {
+            "type": "string",
+            "description": "JSON-encoded payload that was (or will be) POSTed to the URL."
+          },
+          "Status": {
+            "type": "string",
+            "description": "Delivery lifecycle state.",
+            "enum": ["pending", "delivering", "delivered", "failed"]
+          },
+          "Attempts": {
+            "type": "integer",
+            "description": "Number of delivery attempts so far."
+          },
+          "LastAttemptAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Timestamp of the most recent delivery attempt."
+          },
+          "LastError": {
+            "type": "string",
+            "description": "Error from the most recent failed attempt, if any."
+          },
+          "NextRetryAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the worker is next allowed to retry. Exponential backoff, capped at 5 minutes between attempts."
+          },
+          "CreatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the delivery record was created."
           }
         }
       }
     },
     "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "API key passed as an Authorization bearer token: `Authorization: Bearer <API_KEY>`."
+      },
       "apiKeyAuth": {
         "type": "apiKey",
-        "name": "Authorization",
+        "name": "X-API-Key",
         "in": "header",
-        "description": "API key for authentication. Pass the raw key value in the Authorization header."
+        "description": "API key passed as the raw value of the `X-API-Key` header (no `Bearer ` prefix)."
       }
     }
   },
   "security": [
+    {
+      "bearerAuth": []
+    },
     {
       "apiKeyAuth": []
     }

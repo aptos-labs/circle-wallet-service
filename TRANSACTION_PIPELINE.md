@@ -177,7 +177,9 @@ The counter can drift from on-chain state in two directions. Each has a dedicate
 | `ReleaseSequence` | Transient failure on a claimed row (`requeueTransient`, `requeueRecord`) | `-1` |
 | `ShiftSenderSequences` | Permanent failure; higher-seq siblings need to slide down | `-N` (number of siblings requeued) |
 | `RecoverStaleProcessing` | Recovery loop finds stuck `processing` rows | `-N` per sender |
-| `ReconcileSequence` | Submit returned a sequence-number error | `= max(current, chainSeq)` |
+| `ReconcileSequence` | Submit *or* simulation reported a sequence-number mismatch | `= max(current, chainSeq)` |
+
+**Two incompatible counter models** live behind this table. `ReleaseSequence`, `ShiftSenderSequences`, and `RecoverStaleProcessing` treat `next_sequence` as private allocation bookkeeping — giving back an unused slot is correct accounting. `ReconcileSequence` overwrites the counter with *chain truth* — after it runs, any prior local allocation history is irrelevant. Mixing the two (e.g. reconcile then release) pushes the counter back into the "too old" zone and causes an infinite drift-1 loop. The reconcile-path requeue helper is `requeueWithoutRelease` for exactly this reason.
 
 ---
 
@@ -254,7 +256,9 @@ Because the in-flight signed transactions after the failing one were built with 
 
 #### Sequence-error detection
 
-`isSequenceError` matches error strings against `sequence_number`, `sequence number`, or `invalid_sequence`. This is fragile — if Aptos changes the wording, real sequence mismatches will fall through to the generic retry branch and keep failing until `max_retry_duration` expires. A structured error code from the SDK would be more robust.
+On the **submit** path, `isSequenceError` (in `submitter.go`) matches error strings against `sequence_number`, `sequence number`, or `invalid_sequence`. On the **simulation** path, `aptos.IsSequenceVmStatus` recognises `SEQUENCE_NUMBER_TOO_OLD`/`TOO_NEW`/`TOO_BIG` from the structured VM status on a `/transactions/simulate` response. Both routes funnel into `reconcileAndRequeue`.
+
+The submit-side string match is fragile — if Aptos changes the wording, real sequence mismatches will fall through to the generic retry branch and keep failing until `max_retry_duration` expires. A structured error code from the SDK would be more robust. Simulation is already structured (VM status), so no brittleness there.
 
 ---
 
@@ -306,7 +310,8 @@ sequenceDiagram
 | API server process dies between HTTP accept and insert | n/a (request is lost) | Client retries with same `Idempotency-Key` |
 | Worker crashes with a row in `processing` | `recoverLoop` → `RecoverStaleProcessing` after `SubmitterStaleProcessingSeconds` | Row returned to `queued` with `sequence_number=NULL`; counter decremented by N |
 | Circle signing fails transiently | error in `prepareRecord` | `requeueTransient` → `queued`, `ReleaseSequence` (-1), `attempt_count++` |
-| Aptos submit fails with sequence mismatch | `isSequenceError` true | Fetch chain seq → `ReconcileSequence` (up only) → requeue this + siblings |
+| Simulation rejects with sequence VM status | `aptos.IsSequenceVmStatus` true in `prepareRecord` | Fetch chain seq → `ReconcileSequence` (up only) → `requeueWithoutRelease` for this + siblings |
+| Aptos submit fails with sequence mismatch | `isSequenceError` true in `submitSigned` | Fetch chain seq → `ReconcileSequence` (up only) → `requeueWithoutRelease` for this + siblings |
 | Aptos submit fails, past `MaxRetryDurationSeconds` | Age check in `submitSigned` | `markPermanentFailure` → `failed`, `ShiftSenderSequences` to slide down higher siblings, notify webhook |
 | Transaction expires before claim | `now > ExpiresAt` check in `prepareRecord` | `markPermanentFailure` |
 | Producer claims after pipeline cancelled | `sweepOrphanedProcessing` on worker exit | Requeue |
