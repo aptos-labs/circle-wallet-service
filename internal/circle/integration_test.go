@@ -59,7 +59,7 @@ func integrationAptosClient(t *testing.T) *aptos.Client {
 		}
 		chainID = uint8(n)
 	}
-	c, err := aptos.NewClient(nodeURL, chainID, 600, 2_000_000)
+	c, err := aptos.NewClient(nodeURL, chainID, 600, 2_000_000, os.Getenv("APTOS_API_KEY"))
 	if err != nil {
 		t.Fatalf("aptos client: %v", err)
 	}

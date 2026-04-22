@@ -15,7 +15,7 @@ func TestQueryMissingFunctionID(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	defer srv.Close()
 
-	cli, err := aptos.NewClient(srv.URL+"/v1", 2, 3600, 2000000)
+	cli, err := aptos.NewClient(srv.URL+"/v1", 2, 3600, 2000000, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestQueryValidRequest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cli, err := aptos.NewClient(srv.URL+"/v1", 2, 3600, 2000000)
+	cli, err := aptos.NewClient(srv.URL+"/v1", 2, 3600, 2000000, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestQueryInvalidFunctionID(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	defer srv.Close()
 
-	cli, err := aptos.NewClient(srv.URL+"/v1", 2, 3600, 2000000)
+	cli, err := aptos.NewClient(srv.URL+"/v1", 2, 3600, 2000000, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestQueryArgumentCountMismatch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cli, err := aptos.NewClient(srv.URL+"/v1", 2, 3600, 2000000)
+	cli, err := aptos.NewClient(srv.URL+"/v1", 2, 3600, 2000000, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestQueryViewHTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cli, err := aptos.NewClient(srv.URL+"/v1", 2, 3600, 2000000)
+	cli, err := aptos.NewClient(srv.URL+"/v1", 2, 3600, 2000000, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestQueryABIFetchError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cli, err := aptos.NewClient(srv.URL+"/v1", 2, 3600, 2000000)
+	cli, err := aptos.NewClient(srv.URL+"/v1", 2, 3600, 2000000, "")
 	if err != nil {
 		t.Fatal(err)
 	}

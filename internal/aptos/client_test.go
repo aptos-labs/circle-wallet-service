@@ -27,7 +27,7 @@ func testAptosClient(t *testing.T) *Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := NewClient(nodeURL, uint8(chainID), 60, 2000000)
+	c, err := NewClient(nodeURL, uint8(chainID), 60, 2000000, os.Getenv("APTOS_API_KEY"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func testWalletAddress(t *testing.T) string {
 }
 
 func TestNewClient(t *testing.T) {
-	c, err := NewClient("https://api.testnet.aptoslabs.com/v1", 2, 60, 2000000)
+	c, err := NewClient("https://api.testnet.aptoslabs.com/v1", 2, 60, 2000000, "")
 	if err != nil {
 		t.Fatal(err)
 	}

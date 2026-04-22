@@ -89,7 +89,7 @@ func run(logger *slog.Logger) error {
 	var aptosClient *aptos.Client
 	var abiCache *aptos.ABICache
 	if cfg.AptosNodeURL() != "" {
-		aptosClient, err = aptos.NewClient(cfg.AptosNodeURL(), cfg.AptosChainID(), int64(cfg.TxnExpirationSeconds()), cfg.MaxGasAmount())
+		aptosClient, err = aptos.NewClient(cfg.AptosNodeURL(), cfg.AptosChainID(), int64(cfg.TxnExpirationSeconds()), cfg.MaxGasAmount(), cfg.AptosAPIKey())
 		if err != nil {
 			return fmt.Errorf("init aptos client: %w", err)
 		}

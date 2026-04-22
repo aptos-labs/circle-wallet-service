@@ -57,6 +57,11 @@ type MySQLConfig struct {
 type AptosConfig struct {
 	NodeURL string `yaml:"node_url"`
 	ChainID uint8  `yaml:"chain_id"`
+	// APIKey, when set, is sent as `Authorization: Bearer <APIKey>` on every
+	// request to NodeURL. Required in practice for any non-trivial load
+	// against public Aptos endpoints (Geomi / Aptos Labs), which otherwise
+	// rate-limit by IP. Empty = no auth header.
+	APIKey string `yaml:"api_key"`
 }
 
 type CircleConfig struct {
@@ -227,6 +232,9 @@ func applyEnvOverrides(c *Config) error {
 	if v, ok := os.LookupEnv("APTOS_NODE_URL"); ok {
 		c.Aptos.NodeURL = strings.TrimSpace(v)
 	}
+	if v, ok := os.LookupEnv("APTOS_API_KEY"); ok {
+		c.Aptos.APIKey = strings.TrimSpace(v)
+	}
 	if v, ok := os.LookupEnv("APTOS_CHAIN_ID"); ok {
 		n, err := strconv.ParseUint(strings.TrimSpace(v), 10, 8)
 		if err != nil {
@@ -336,6 +344,10 @@ func (c *Config) AptosNodeURL() string {
 
 func (c *Config) AptosChainID() uint8 {
 	return c.Aptos.ChainID
+}
+
+func (c *Config) AptosAPIKey() string {
+	return c.Aptos.APIKey
 }
 
 func (c *Config) CircleAPIKey() string {

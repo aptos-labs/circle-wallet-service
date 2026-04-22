@@ -90,7 +90,7 @@ Tests that need two funded wallets skip if only one wallet is configured. Inline
 
 Workflow [.github/workflows/e2e.yml](.github/workflows/e2e.yml) runs on `workflow_dispatch`, on `push` to `main`, and on `pull_request` against `main`. It starts MySQL, builds the server, runs it with secrets, then `go test -tags=e2e ./examples/`. If required secrets are missing, the job **skips** E2E steps and succeeds (so fork PRs without secrets stay green). A concurrency group cancels in-flight E2E runs when a new commit lands on the same ref, so two runs never race against the same Circle wallet.
 
-Configure these **repository secrets** to run live E2E: `API_KEY`, `APTOS_NODE_URL`, `APTOS_CHAIN_ID` (recommended, e.g. `2` for testnet), `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`, `CIRCLE_WALLETS` (JSON array of `{"wallet_id","address","public_key"}` objects used by E2E tests; use **two** wallets to exercise dual-wallet throughput).
+Configure these **repository secrets** to run live E2E: `API_KEY`, `APTOS_NODE_URL`, `APTOS_API_KEY` (strongly recommended; without it, throughput tests trip the public-IP rate limit and flake with 429s), `APTOS_CHAIN_ID` (recommended, e.g. `2` for testnet), `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`, `CIRCLE_WALLETS` (JSON array of `{"wallet_id","address","public_key"}` objects used by E2E tests; use **two** wallets to exercise dual-wallet throughput).
 
 ## Configuration
 
@@ -117,6 +117,7 @@ The server runs embedded migrations on startup. `GET /v1/health?deep=1` checks d
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `APTOS_NODE_URL` | *(required)* | Aptos node RPC URL (e.g. `https://api.testnet.aptoslabs.com/v1`) |
+| `APTOS_API_KEY` / `aptos.api_key` | *(empty)* | Bearer token sent as `Authorization` on all Aptos requests (SDK, `/view`, `/transactions/simulate`). Required in practice for any non-trivial load — the public endpoint rate-limits per IP. |
 | `APTOS_CHAIN_ID` | `0` | Chain ID: `1` = mainnet, `2` = testnet |
 
 ### Circle
