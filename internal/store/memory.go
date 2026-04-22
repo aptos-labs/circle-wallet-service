@@ -12,6 +12,7 @@ type MemoryStore struct {
 	mu             sync.RWMutex
 	records        map[string]*TransactionRecord
 	idempotencyIdx map[string]string // idempotency_key -> record ID
+	sequences      map[string]uint64 // sender_address -> next_sequence
 	ttl            time.Duration
 	done           chan struct{}
 }
@@ -22,6 +23,7 @@ func NewMemoryStore(ttl time.Duration) *MemoryStore {
 	s := &MemoryStore{
 		records:        make(map[string]*TransactionRecord),
 		idempotencyIdx: make(map[string]string),
+		sequences:      make(map[string]uint64),
 		ttl:            ttl,
 		done:           make(chan struct{}),
 	}
