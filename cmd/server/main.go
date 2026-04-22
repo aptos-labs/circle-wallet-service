@@ -104,6 +104,7 @@ func run(logger *slog.Logger) error {
 		memStore,
 		cfg.WebhookMaxRetries(),
 		time.Duration(cfg.WebhookTimeoutSeconds())*time.Second,
+		cfg.WebhookSigningSecret(),
 		logger,
 	)
 

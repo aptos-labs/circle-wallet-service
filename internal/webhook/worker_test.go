@@ -2,11 +2,16 @@ package webhook
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,7 +19,7 @@ import (
 
 // newTestWorker creates a Worker with a plain HTTP client (no SSRF dialer) for httptest usage.
 func newTestWorker(ws WebhookStore, maxRetries int, timeout time.Duration, logger *slog.Logger) *Worker {
-	w := NewWorker(ws, maxRetries, timeout, logger)
+	w := NewWorker(ws, maxRetries, timeout, "", logger)
 	w.httpClient = &http.Client{Timeout: timeout}
 	return w
 }
@@ -280,6 +285,78 @@ func TestWorkerConcurrency(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("worker did not exit after cancel")
+	}
+}
+
+func TestDeliver_SignsWithHMAC(t *testing.T) {
+	t.Parallel()
+	const secret = "s3cret-key"
+	const payload = `{"txn_id":"abc","status":"confirmed"}`
+
+	var gotSig, gotTs string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSig = r.Header.Get("X-Signature")
+		gotTs = r.Header.Get("X-Signature-Timestamp")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	now := time.Now().UTC()
+	rec := &DeliveryRecord{
+		ID: "sig-1", TransactionID: "t-sig", URL: srv.URL, Payload: payload,
+		Status: "pending", NextRetryAt: now, CreatedAt: now,
+	}
+	ms := &mockWorkerStore{}
+	w := NewWorker(ms, 5, 5*time.Second, secret, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w.httpClient = &http.Client{Timeout: 5 * time.Second} // bypass SSRF dialer for httptest
+
+	before := time.Now().UTC().Unix()
+	w.deliver(context.Background(), rec)
+	after := time.Now().UTC().Unix()
+
+	if !strings.HasPrefix(gotSig, "sha256=") {
+		t.Fatalf("X-Signature = %q, want sha256= prefix", gotSig)
+	}
+	ts, err := strconv.ParseInt(gotTs, 10, 64)
+	if err != nil {
+		t.Fatalf("X-Signature-Timestamp = %q: %v", gotTs, err)
+	}
+	if ts < before || ts > after {
+		t.Fatalf("timestamp %d outside [%d,%d]", ts, before, after)
+	}
+
+	// Recompute expected signature: HMAC-SHA256(secret, "<ts>.<payload>")
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(gotTs))
+	mac.Write([]byte{'.'})
+	mac.Write([]byte(payload))
+	want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(gotSig), []byte(want)) {
+		t.Fatalf("signature mismatch:\n got = %q\nwant = %q", gotSig, want)
+	}
+}
+
+func TestDeliver_NoSignatureWhenSecretEmpty(t *testing.T) {
+	t.Parallel()
+	var hadSig, hadTs bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, hadSig = r.Header["X-Signature"]
+		_, hadTs = r.Header["X-Signature-Timestamp"]
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	now := time.Now().UTC()
+	rec := &DeliveryRecord{
+		ID: "nosig", TransactionID: "t", URL: srv.URL, Payload: `{}`,
+		Status: "pending", NextRetryAt: now, CreatedAt: now,
+	}
+	ms := &mockWorkerStore{}
+	w := newTestWorker(ms, 5, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w.deliver(context.Background(), rec)
+
+	if hadSig || hadTs {
+		t.Fatalf("unexpected signature headers with empty secret (sig=%v ts=%v)", hadSig, hadTs)
 	}
 }
 

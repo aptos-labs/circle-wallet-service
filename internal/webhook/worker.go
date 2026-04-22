@@ -3,33 +3,46 @@ package webhook
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 )
 
 // Worker is the background goroutine that delivers webhooks from the outbox.
 // It uses an HTTP client with SSRF-safe dialing (rejects private/loopback IPs).
 type Worker struct {
-	store      WebhookStore
-	httpClient *http.Client
-	maxRetries int
-	logger     *slog.Logger
+	store         WebhookStore
+	httpClient    *http.Client
+	maxRetries    int
+	signingSecret []byte // HMAC-SHA256 key; nil disables signing
+	logger        *slog.Logger
 }
 
-func NewWorker(ws WebhookStore, maxRetries int, timeout time.Duration, logger *slog.Logger) *Worker {
+// NewWorker builds a Worker. signingSecret is the shared HMAC-SHA256 key used
+// to sign outbound deliveries; when empty, deliveries are sent without a
+// signature header (useful for dev/tests).
+func NewWorker(ws WebhookStore, maxRetries int, timeout time.Duration, signingSecret string, logger *slog.Logger) *Worker {
 	transport := &http.Transport{
 		DialContext: ssrfSafeDialer(timeout),
 	}
+	var secret []byte
+	if signingSecret != "" {
+		secret = []byte(signingSecret)
+	}
 	return &Worker{
-		store:      ws,
-		httpClient: &http.Client{Timeout: timeout, Transport: transport},
-		maxRetries: maxRetries,
-		logger:     logger,
+		store:         ws,
+		httpClient:    &http.Client{Timeout: timeout, Transport: transport},
+		maxRetries:    maxRetries,
+		signingSecret: secret,
+		logger:        logger,
 	}
 }
 
@@ -115,6 +128,7 @@ func (w *Worker) deliver(ctx context.Context, rec *DeliveryRecord) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	w.signRequest(req, rec.Payload)
 
 	resp, err := w.httpClient.Do(req)
 	if err != nil {
@@ -159,6 +173,24 @@ func (w *Worker) handleRetry(ctx context.Context, rec *DeliveryRecord, errMsg st
 		rec.Status = "pending"
 	}
 	w.update(ctx, rec)
+}
+
+// signRequest attaches an HMAC-SHA256 signature of "<ts>.<payload>" as
+// X-Signature: sha256=<hex>, plus X-Signature-Timestamp. Including the
+// timestamp in the signed string lets receivers reject replayed deliveries
+// by comparing the header timestamp against their own clock.
+// No-op when the worker has no signing secret.
+func (w *Worker) signRequest(req *http.Request, payload string) {
+	if len(w.signingSecret) == 0 {
+		return
+	}
+	ts := strconv.FormatInt(time.Now().UTC().Unix(), 10)
+	mac := hmac.New(sha256.New, w.signingSecret)
+	mac.Write([]byte(ts))
+	mac.Write([]byte{'.'})
+	mac.Write([]byte(payload))
+	req.Header.Set("X-Signature-Timestamp", ts)
+	req.Header.Set("X-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 }
 
 func (w *Worker) update(ctx context.Context, rec *DeliveryRecord) {
