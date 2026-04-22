@@ -10,8 +10,17 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// aptosTxnClient is the slice of aptos.Client the poller depends on.
+//
+// TransactionByHashCtx wraps the underlying SDK's context-free
+// TransactionByHash with context cancellation. The SDK's HTTP client has its
+// own total timeout, but without a context check a slow or unresponsive node
+// would pin this goroutine for the full HTTP timeout and stall the entire
+// poll tick (which is single-threaded, rate-limited, and iterates every
+// submitted row). Surfacing ctx here lets the poller drop the rest of the
+// sweep cleanly on shutdown instead of waiting for the in-flight RPC.
 type aptosTxnClient interface {
-	TransactionByHash(hash string) (*api.Transaction, error)
+	TransactionByHashCtx(ctx context.Context, hash string) (*api.Transaction, error)
 }
 
 type notifyHook interface {
@@ -123,7 +132,7 @@ func (p *Poller) confirmRecord(ctx context.Context, rec *store.TransactionRecord
 			return
 		}
 	}
-	txn, err := p.client.TransactionByHash(rec.TxnHash)
+	txn, err := p.client.TransactionByHashCtx(ctx, rec.TxnHash)
 	if err != nil {
 		if time.Now().UTC().After(rec.ExpiresAt) {
 			rec.Status = store.StatusExpired
