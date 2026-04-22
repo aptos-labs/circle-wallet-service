@@ -30,7 +30,9 @@ jobs:
   e2e-live:
     name: E2E (live)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Kept a bit above the go-test timeout (30m) so the job wrapper doesn't
+    # kill a near-finished run before `go test` can report.
+    timeout-minutes: 40
     services:
       mysql:
         image: mysql:8.0
@@ -47,6 +49,11 @@ jobs:
     env:
       MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/jcci_e2e?parseTime=true
       API_KEY: ${{ secrets.API_KEY }}
+      # IMPORTANT: APTOS_NODE_URL must point at an authenticated endpoint
+      # (e.g. a Geomi API key URL). Throughput + simulate + poller traffic
+      # blows through the anonymous public-IP rate limit on testnet
+      # (40k compute units per 300s) and returns 429s that cascade into
+      # flaky test failures unrelated to the pipeline logic.
       APTOS_NODE_URL: ${{ secrets.APTOS_NODE_URL }}
       APTOS_CHAIN_ID: ${{ secrets.APTOS_CHAIN_ID }}
       CIRCLE_API_KEY: ${{ secrets.CIRCLE_API_KEY }}
@@ -58,11 +65,16 @@ jobs:
       SIMULATE_BEFORE_SUBMIT: "true"
       CALIBRATE_GAS_FROM_SIMULATION: "true"
       # Throughput tests enqueue N txs per sender and they drain FIFO. With the
-      # default 60s expiry, the tail of an 8-deep queue blows past the cutoff
+      # default 60s expiry, the tail of an N-deep queue blows past the cutoff
       # against live Circle + testnet latency and fails with
-      # "transaction expired before submit" — a test-env timing artifact, not a
-      # real system bug. 600s gives comfortable headroom for CI.
+      # "transaction expired before submit" — a test-env timing artifact, not
+      # a real system bug. 600s gives comfortable headroom for CI.
       TXN_EXPIRATION_SECONDS: "600"
+      # The submitter caps per-record retries against time.Since(CreatedAt).
+      # Default is 300s, which is tight for a live Circle + testnet FIFO
+      # queue under concurrent load. Raise for CI so throughput-tail retries
+      # get room to land before being marked "max retry duration exceeded".
+      SUBMITTER_MAX_RETRY_DURATION_SECONDS: "1200"
       E2E_BASE_URL: http://127.0.0.1:8080
       E2E_API_KEY: ${{ secrets.API_KEY }}
       E2E_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/jcci_e2e?parseTime=true
@@ -109,7 +121,11 @@ jobs:
 
       - name: Run E2E tests
         if: steps.gate.outputs.skip != '1'
-        run: go test -tags=e2e ./examples/ -count=1 -v
+        # -timeout bumped to 30m: the default 10m was aborting the run before
+        # later tests (status monotonicity, idempotency, stale recovery) even
+        # got to run, because throughput tests can now take 5m+ each against
+        # live Circle + testnet.
+        run: go test -tags=e2e ./examples/ -count=1 -v -timeout=30m
 
       - name: E2E skipped
         if: steps.gate.outputs.skip == '1'
