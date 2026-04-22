@@ -34,13 +34,14 @@ type transactionSubmitter interface {
 
 // signedItem is the unit of work passed from the signing producer to the
 // submitting consumer. It carries the original DB row (for status updates),
-// the fully signed transaction ready to POST, and the sequence number the
-// signing pipeline used — kept on the item so we can log it even after the
-// row's SequenceNumber field is cleared on failure.
+// the fully signed transaction ready to POST, the sequence number the signing
+// pipeline used, and the transaction hash (computed once, during sign, so the
+// submitter can pre-persist it before broadcast without re-serializing).
 type signedItem struct {
 	rec       *store.TransactionRecord
 	signedTxn *aptossdk.SignedTransaction
 	seqNum    uint64
+	hash      string
 }
 
 // Submitter is the top-level dispatcher that owns per-sender workers.
@@ -464,7 +465,15 @@ func (s *Submitter) prepareRecord(ctx context.Context, rec *store.TransactionRec
 		return nil, false
 	}
 
-	return &signedItem{rec: rec, signedTxn: signedTxn, seqNum: useSeq}, false
+	// Compute hash once, here, so submitSigned can pre-persist it without
+	// re-serializing and without re-handling an error path mid-flight.
+	hash, err := signedTxn.Hash()
+	if err != nil {
+		s.markPermanentFailure(ctx, rec, "assembly", "compute txn hash: "+err.Error())
+		return nil, false
+	}
+
+	return &signedItem{rec: rec, signedTxn: signedTxn, seqNum: useSeq, hash: hash}, false
 }
 
 // submitSigned POSTs a signed transaction to the Aptos node and updates the DB
@@ -477,7 +486,32 @@ func (s *Submitter) prepareRecord(ctx context.Context, rec *store.TransactionRec
 //     and any processing siblings so they can be re-signed.
 //   - Aged-out error (past max_retry_duration) → permanent failure.
 //   - Anything else → transient; requeue and try again on the next tick.
+//
+// Duplicate-submit safety. The signed transaction's hash is computed and
+// persisted to the DB BEFORE broadcast. This is the linchpin: if the chain
+// accepts the transaction but the post-submit status update fails, the hash
+// is already durably associated with the record. The poller's processing+hash
+// recovery path (see internal/poller) will confirm by on-chain lookup without
+// any re-sign — a re-sign would allocate a different sequence number and
+// produce a duplicate broadcast for the same logical request. Sweepers
+// (RecoverStaleProcessing, sweepOrphanedProcessing) skip rows with txn_hash
+// set so they won't revert a pre-broadcast hash back to queued.
 func (s *Submitter) submitSigned(ctx context.Context, item *signedItem) bool {
+	// Pre-persist the hash before broadcast. The hash was computed during
+	// signing (see prepareRecord) and is now durably written so that any
+	// post-submit failure can be recovered by the poller without re-signing.
+	item.rec.TxnHash = item.hash
+	item.rec.UpdatedAt = time.Now().UTC()
+	if err := s.queue.Update(ctx, item.rec); err != nil {
+		// Nothing has hit the chain yet; clear the in-memory hash and
+		// requeue transiently so the next attempt starts clean.
+		s.logger.Error("submitter: pre-submit hash persist failed",
+			"id", item.rec.ID, "hash", item.hash, "error", err)
+		item.rec.TxnHash = ""
+		s.requeueTransient(ctx, item.rec, fmt.Errorf("persist pre-submit hash: %w", err))
+		return false
+	}
+
 	sub := s.txSubmit
 	if sub == nil {
 		sub = s.client
@@ -489,10 +523,14 @@ func (s *Submitter) submitSigned(ctx context.Context, item *signedItem) bool {
 		"id", item.rec.ID,
 		"sender", item.rec.SenderAddress,
 		"sequence", item.seqNum,
+		"hash", item.hash,
 		"attempt", item.rec.AttemptCount,
 	)
 	submitResp, err := sub.SubmitTransaction(item.signedTxn)
 	if err != nil {
+		// Submit failed: nothing on chain. Clear the pre-persisted hash so
+		// downstream failure paths don't leave a stale hash on the row.
+		item.rec.TxnHash = ""
 		if isSequenceError(err) {
 			s.logger.Warn("submitter: submit rejected as sequence error",
 				"id", item.rec.ID,
@@ -517,17 +555,60 @@ func (s *Submitter) submitSigned(ctx context.Context, item *signedItem) bool {
 		return false
 	}
 
+	// Defensive: server-returned hash should match what we computed.
+	if submitResp.Hash != "" && submitResp.Hash != item.hash {
+		s.logger.Warn("submitter: server-returned hash differs from local",
+			"id", item.rec.ID, "local", item.hash, "server", submitResp.Hash)
+		item.rec.TxnHash = submitResp.Hash
+	}
+
 	item.rec.Status = store.StatusSubmitted
-	item.rec.TxnHash = submitResp.Hash
 	item.rec.UpdatedAt = time.Now().UTC()
 	item.rec.LastError = ""
-	if err := s.queue.Update(ctx, item.rec); err != nil {
-		s.logger.Error("submitter: update submitted", "id", item.rec.ID, "error", err)
+	if err := s.updateWithRetry(ctx, item.rec); err != nil {
+		// The chain has accepted the transaction (hash is persisted) but we
+		// can't flip the status. Leave the record in processing+hash state;
+		// the poller's recovery path will confirm it by on-chain lookup.
+		// Do NOT requeue: that would clear the sequence and risk a duplicate
+		// re-sign at a new sequence number.
+		s.logger.Error("submitter: post-submit status update failed; record left in processing+hash for poller recovery",
+			"id", item.rec.ID,
+			"hash", item.rec.TxnHash,
+			"sequence", item.seqNum,
+			"error", err,
+		)
 		return false
 	}
 
 	s.logger.Info("submitter: submitted", "id", item.rec.ID, "hash", item.rec.TxnHash, "sequence", item.seqNum)
 	return true
+}
+
+// updateWithRetry retries queue.Update with a short bounded exponential backoff.
+// Used on the post-submit status transition, where giving up and requeuing
+// would cause a duplicate broadcast at a new sequence number. Five attempts
+// across ~1.5 seconds covers routine DB blips; beyond that the poller's
+// processing+hash recovery path takes over.
+func (s *Submitter) updateWithRetry(ctx context.Context, rec *store.TransactionRecord) error {
+	const maxAttempts = 5
+	var lastErr error
+	for i := range maxAttempts {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := s.queue.Update(ctx, rec); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		backoff := time.Duration(50*(1<<i)) * time.Millisecond // 50, 100, 200, 400, 800ms
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return lastErr
 }
 
 // markPermanentFailure terminates a transaction with status=failed and fires
@@ -810,6 +891,12 @@ func (s *Submitter) drainPipeline(ctx context.Context, ch <-chan signedItem, sen
 // sweepOrphanedProcessing requeues any records for this sender that are still
 // in "processing" after the worker exits. This handles the race where the
 // producer commits a claim after pipeCancel but before it checks ctx.Err().
+//
+// Records with txn_hash set are deliberately skipped: they were broadcast to
+// chain but their post-submit status update failed. Requeuing them would
+// clear the sequence and trigger a re-sign at a different sequence number,
+// producing a duplicate on-chain. The poller's processing+hash recovery path
+// owns these rows.
 func (s *Submitter) sweepOrphanedProcessing(ctx context.Context, senderAddress string) {
 	records, err := s.queue.ListByStatus(ctx, store.StatusProcessing)
 	if err != nil {
@@ -818,6 +905,10 @@ func (s *Submitter) sweepOrphanedProcessing(ctx context.Context, senderAddress s
 	}
 	for _, rec := range records {
 		if rec.SenderAddress != senderAddress {
+			continue
+		}
+		if rec.TxnHash != "" {
+			// Already broadcast; poller confirms by hash.
 			continue
 		}
 		s.logger.Warn("submitter: sweeping orphaned processing record", "id", rec.ID, "sender", senderAddress)

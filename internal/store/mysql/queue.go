@@ -223,6 +223,13 @@ func (s *Store) ForceResetSequenceToChain(ctx context.Context, senderAddress str
 // worker's work becomes available to the next dispatcher tick within a
 // reasonable window.
 //
+// Rows with txn_hash set are deliberately excluded. A processing row with a
+// hash means the submitter pre-persisted the hash, broadcast to chain, but
+// its post-submit status flip failed mid-flight. Reverting such a row to
+// queued would clear its sequence and cause the next worker to re-sign at a
+// different sequence number — a duplicate on-chain broadcast. The poller's
+// processing+hash recovery path owns those rows.
+//
 // The counter decrement is bounded at zero (GREATEST(… - ?, 0)) to survive the
 // pathological case where the counter has already been reconciled with chain
 // state that's lower than the recovered count.
@@ -246,6 +253,7 @@ func (s *Store) RecoverStaleProcessing(ctx context.Context, olderThan time.Durat
 	rows, err := tx.QueryContext(ctx, `
 		SELECT sender_address, COUNT(*) FROM transactions
 		WHERE status = ? AND sequence_number IS NOT NULL
+		  AND (txn_hash IS NULL OR txn_hash = '')
 		  AND updated_at < (UTC_TIMESTAMP(3) - INTERVAL ? SECOND)
 		GROUP BY sender_address
 		FOR UPDATE
@@ -272,7 +280,9 @@ func (s *Store) RecoverStaleProcessing(ctx context.Context, olderThan time.Durat
 	res, err := tx.ExecContext(ctx, `
 		UPDATE transactions
 		SET status = ?, sequence_number = NULL, updated_at = UTC_TIMESTAMP(3)
-		WHERE status = ? AND updated_at < (UTC_TIMESTAMP(3) - INTERVAL ? SECOND)
+		WHERE status = ?
+		  AND (txn_hash IS NULL OR txn_hash = '')
+		  AND updated_at < (UTC_TIMESTAMP(3) - INTERVAL ? SECOND)
 	`, string(store.StatusQueued), string(store.StatusProcessing), sec)
 	if err != nil {
 		return 0, err
