@@ -127,7 +127,15 @@ func run(logger *slog.Logger) error {
 	// Poller only needs the Aptos client — it confirms already-submitted txns by
 	// hash and doesn't sign anything. Safe to run even when Circle is absent.
 	if aptosClient != nil {
-		txnPoller := poller.New(aptosClient, memStore, notifier, time.Duration(cfg.PollIntervalSeconds())*time.Second, logger)
+		txnPoller := poller.New(
+			aptosClient,
+			memStore,
+			notifier,
+			time.Duration(cfg.PollIntervalSeconds())*time.Second,
+			cfg.PollerRPCRequestsPerSecond(),
+			cfg.PollerRPCBurst(),
+			logger,
+		)
 		go txnPoller.Run(ctx)
 	}
 

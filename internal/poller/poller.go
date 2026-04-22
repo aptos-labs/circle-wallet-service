@@ -7,6 +7,7 @@ import (
 
 	"github.com/aptos-labs/aptos-go-sdk/api"
 	"github.com/aptos-labs/jc-contract-integration/internal/store"
+	"golang.org/x/time/rate"
 )
 
 type aptosTxnClient interface {
@@ -18,20 +19,39 @@ type notifyHook interface {
 }
 
 // Poller polls the Aptos node for submitted transaction outcomes.
+//
+// Each poll cycle iterates over all submitted rows (plus processing rows with
+// a pre-persisted hash, see Fix #1) and issues a TransactionByHash call for
+// each one. With a large backlog that fan-out is a burst against the node
+// that can trigger 429/503 and cascade into false "lookup error" log spam.
+// A token-bucket rate limiter smooths the bursts; when it's nil, rate
+// limiting is disabled.
 type Poller struct {
 	client   aptosTxnClient
 	store    store.Store
 	notifier notifyHook
 	interval time.Duration
+	limiter  *rate.Limiter
 	logger   *slog.Logger
 }
 
-func New(client aptosTxnClient, st store.Store, notifier notifyHook, interval time.Duration, logger *slog.Logger) *Poller {
+// New builds a Poller. rpcRPS > 0 enables a token-bucket limiter with the
+// given steady-state rate and burst; rpcRPS == 0 disables limiting.
+func New(client aptosTxnClient, st store.Store, notifier notifyHook, interval time.Duration, rpcRPS, rpcBurst int, logger *slog.Logger) *Poller {
+	var limiter *rate.Limiter
+	if rpcRPS > 0 {
+		burst := rpcBurst
+		if burst <= 0 {
+			burst = rpcRPS
+		}
+		limiter = rate.NewLimiter(rate.Limit(rpcRPS), burst)
+	}
 	return &Poller{
 		client:   client,
 		store:    st,
 		notifier: notifier,
 		interval: interval,
+		limiter:  limiter,
 		logger:   logger,
 	}
 }
@@ -96,6 +116,12 @@ func (p *Poller) confirmRecord(ctx context.Context, rec *store.TransactionRecord
 			}
 		}
 		return
+	}
+	if p.limiter != nil {
+		if err := p.limiter.Wait(ctx); err != nil {
+			// ctx cancelled mid-sweep; drop this record for this tick.
+			return
+		}
 	}
 	txn, err := p.client.TransactionByHash(rec.TxnHash)
 	if err != nil {

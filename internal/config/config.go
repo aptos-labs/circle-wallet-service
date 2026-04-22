@@ -98,6 +98,12 @@ type SubmitterConfig struct {
 
 type PollerConfig struct {
 	IntervalSeconds int `yaml:"interval_seconds"`
+	// RPCRequestsPerSecond caps the rate at which the poller makes
+	// TransactionByHash calls against the Aptos node across all records it
+	// sweeps in a single tick. 0 disables rate limiting. Defaults to 10.
+	RPCRequestsPerSecond int `yaml:"rpc_requests_per_second"`
+	// RPCBurst is the token-bucket burst size. Defaults to RPCRequestsPerSecond.
+	RPCBurst int `yaml:"rpc_burst"`
 }
 
 type WebhookConfig struct {
@@ -157,7 +163,11 @@ func defaultConfig() *Config {
 			SimulateBeforeSubmit:       true,
 			CalibrateGasFromSimulation: true,
 		},
-		Poller: PollerConfig{IntervalSeconds: 5},
+		Poller: PollerConfig{
+			IntervalSeconds:      5,
+			RPCRequestsPerSecond: 10,
+			RPCBurst:             10,
+		},
 		Webhook: WebhookConfig{
 			GlobalURL:      "",
 			MaxRetries:     5,
@@ -379,6 +389,17 @@ func (c *Config) TxnExpirationSeconds() int {
 
 func (c *Config) PollIntervalSeconds() int {
 	return c.Poller.IntervalSeconds
+}
+
+func (c *Config) PollerRPCRequestsPerSecond() int {
+	return c.Poller.RPCRequestsPerSecond
+}
+
+func (c *Config) PollerRPCBurst() int {
+	if c.Poller.RPCBurst > 0 {
+		return c.Poller.RPCBurst
+	}
+	return c.Poller.RPCRequestsPerSecond
 }
 
 func (c *Config) SubmitterPollIntervalMs() int {
