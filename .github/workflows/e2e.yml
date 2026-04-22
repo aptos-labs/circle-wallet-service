@@ -49,12 +49,15 @@ jobs:
     env:
       MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/jcci_e2e?parseTime=true
       API_KEY: ${{ secrets.API_KEY }}
-      # IMPORTANT: APTOS_NODE_URL must point at an authenticated endpoint
-      # (e.g. a Geomi API key URL). Throughput + simulate + poller traffic
-      # blows through the anonymous public-IP rate limit on testnet
-      # (40k compute units per 300s) and returns 429s that cascade into
-      # flaky test failures unrelated to the pipeline logic.
       APTOS_NODE_URL: ${{ secrets.APTOS_NODE_URL }}
+      # APTOS_API_KEY is sent as `Authorization: Bearer <key>` on every call
+      # to the Aptos node (SDK, /view, /transactions/simulate). Without it,
+      # throughput + simulate + poller traffic blows through the anonymous
+      # public-IP rate limit on testnet (40k compute units per 300s) and
+      # returns 429s that cascade into flaky failures unrelated to the
+      # pipeline logic. Configure a Geomi full-node key as APTOS_API_KEY in
+      # the repository's Actions secrets.
+      APTOS_API_KEY: ${{ secrets.APTOS_API_KEY }}
       APTOS_CHAIN_ID: ${{ secrets.APTOS_CHAIN_ID }}
       CIRCLE_API_KEY: ${{ secrets.CIRCLE_API_KEY }}
       CIRCLE_ENTITY_SECRET: ${{ secrets.CIRCLE_ENTITY_SECRET }}

@@ -20,14 +20,24 @@ import (
 
 // Client wraps the Aptos Go SDK with default gas and expiration settings.
 // It exposes Inner for direct SDK access when needed (e.g. account info lookup).
+//
+// When apiKey is non-empty it is sent as `Authorization: Bearer <apiKey>` on
+// every request we make to the node: SDK calls (ABI fetch, account info,
+// submit, transaction-by-hash), and the raw HTTP paths we own (/view and
+// /transactions/simulate). Hitting the public testnet endpoint without a key
+// runs into `40000 compute units per 300s` per-IP limits under throughput
+// load, which manifests as 429s that cascade into test flakiness. Providing a
+// key (e.g. a Geomi key URL's bearer) lifts that ceiling.
 type Client struct {
 	Inner         *aptossdk.Client
 	nodeURL       string
+	apiKey        string
 	expirationSec int64
 	maxGasAmount  uint64
 }
 
-func NewClient(nodeURL string, chainID uint8, expirationSec int64, maxGasAmount uint64) (*Client, error) {
+// NewClient builds an Aptos client. Pass apiKey="" to send no auth header.
+func NewClient(nodeURL string, chainID uint8, expirationSec int64, maxGasAmount uint64, apiKey string) (*Client, error) {
 	sdkClient, err := aptossdk.NewClient(aptossdk.NetworkConfig{
 		NodeUrl: nodeURL,
 		ChainId: chainID,
@@ -35,9 +45,14 @@ func NewClient(nodeURL string, chainID uint8, expirationSec int64, maxGasAmount 
 	if err != nil {
 		return nil, fmt.Errorf("create aptos client: %w", err)
 	}
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey != "" {
+		sdkClient.SetHeader("Authorization", "Bearer "+apiKey)
+	}
 	return &Client{
 		Inner:         sdkClient,
 		nodeURL:       strings.TrimRight(nodeURL, "/"),
+		apiKey:        apiKey,
 		expirationSec: expirationSec,
 		maxGasAmount:  maxGasAmount,
 	}, nil
@@ -147,6 +162,9 @@ func (c *Client) SimulateFeePayerTransaction(
 	}
 	req.Header.Set("Content-Type", "application/x.aptos.signed_transaction+bcs")
 	req.Header.Set("Accept", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 
 	resp, err := simulateHTTPClient.Do(req)
 	if err != nil {
@@ -291,6 +309,9 @@ func (c *Client) View(ctx context.Context, functionID string, typeArgs []string,
 		return nil, fmt.Errorf("build view request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 
 	resp, err := viewHTTPClient.Do(req)
 	if err != nil {
