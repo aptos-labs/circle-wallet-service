@@ -333,7 +333,7 @@ func TestPollLoopExitsOnCancel(t *testing.T) {
 	defer func() { _ = st.Close() }()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	p := New(&mockTxnFetcher{}, st, &mockNotifier{}, time.Millisecond, slog.New(slog.DiscardHandler))
+	p := New(&mockTxnFetcher{}, st, &mockNotifier{}, time.Millisecond, 0, 0, slog.New(slog.DiscardHandler))
 	done := make(chan struct{})
 	go func() {
 		p.Run(ctx)
@@ -468,5 +468,78 @@ func TestVmStatusNonUserInner(t *testing.T) {
 	got := vmStatus(&api.Transaction{Inner: nil})
 	if got != "unknown vm_status" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// TestPollerRateLimiterThrottles seeds more submitted rows than the limiter's
+// burst allows, runs one poll(), and asserts the actual wall-clock elapsed
+// matches the rate budget. 2 RPS burst=2 + 5 rows ⇒ 3 waits at 500ms each ⇒
+// at least ~1.5s before poll() returns.
+func TestPollerRateLimiterThrottles(t *testing.T) {
+	st := store.NewMemoryStore(time.Hour)
+	defer func() { _ = st.Close() }()
+	now := time.Now().UTC()
+	exp := now.Add(time.Hour)
+	for i := range 5 {
+		rec := &store.TransactionRecord{
+			ID: "rl-" + string(rune('a'+i)), Status: store.StatusSubmitted,
+			SenderAddress: "0x1", FunctionID: "0x1::m::f", WalletID: "w",
+			TxnHash: "0xh" + string(rune('a'+i)), CreatedAt: now, UpdatedAt: now, ExpiresAt: exp,
+		}
+		if err := st.Create(context.Background(), rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Fetcher returns a pending txn (Success()==nil) so poll doesn't mutate.
+	fetch := &mockTxnFetcher{fn: func(string) (*api.Transaction, error) {
+		return &api.Transaction{Inner: &api.PendingTransaction{}}, nil
+	}}
+	p := New(fetch, st, &mockNotifier{}, time.Minute, 2, 2, slog.New(slog.DiscardHandler))
+
+	start := time.Now()
+	p.poll(context.Background())
+	elapsed := time.Since(start)
+
+	fetch.mu.Lock()
+	calls := fetch.calls
+	fetch.mu.Unlock()
+	if calls != 5 {
+		t.Fatalf("expected 5 fetcher calls, got %d", calls)
+	}
+	// 5 calls at 2 RPS with burst 2: 2 immediate + 3 waits at 500ms each = ~1.5s.
+	// Allow a slack floor of 1.2s to avoid flakes on slow CI.
+	if elapsed < 1200*time.Millisecond {
+		t.Fatalf("expected throttling to take >=1.2s, got %v", elapsed)
+	}
+}
+
+// TestPollerNoLimiterByDefault verifies poll() with rpcRPS=0 does not throttle
+// and makes all its calls immediately.
+func TestPollerNoLimiterByDefault(t *testing.T) {
+	t.Parallel()
+	st := store.NewMemoryStore(time.Hour)
+	defer func() { _ = st.Close() }()
+	now := time.Now().UTC()
+	exp := now.Add(time.Hour)
+	for i := range 5 {
+		rec := &store.TransactionRecord{
+			ID: "nl-" + string(rune('a'+i)), Status: store.StatusSubmitted,
+			SenderAddress: "0x1", FunctionID: "0x1::m::f", WalletID: "w",
+			TxnHash: "0xn" + string(rune('a'+i)), CreatedAt: now, UpdatedAt: now, ExpiresAt: exp,
+		}
+		if err := st.Create(context.Background(), rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fetch := &mockTxnFetcher{fn: func(string) (*api.Transaction, error) {
+		return &api.Transaction{Inner: &api.PendingTransaction{}}, nil
+	}}
+	p := New(fetch, st, &mockNotifier{}, time.Minute, 0, 0, slog.New(slog.DiscardHandler))
+
+	start := time.Now()
+	p.poll(context.Background())
+	elapsed := time.Since(start)
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("unexpected throttling with rpcRPS=0: %v", elapsed)
 	}
 }
