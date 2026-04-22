@@ -151,6 +151,67 @@ func (s *Store) ReconcileSequence(ctx context.Context, senderAddress string, cha
 	return err
 }
 
+// ForceResetSequenceToChain snaps the per-sender counter down to chain truth.
+//
+// Background. ReconcileSequence is GREATEST-only, which is correct when the
+// chain is AHEAD of our counter (most common — an external submitter
+// advanced the account). When the chain is BEHIND our counter — which
+// happens if we've burned sequences on retries without ever landing one on
+// chain (e.g. repeated SEQUENCE_NUMBER_TOO_NEW simulations) — GREATEST is a
+// no-op and the counter stays stuck. Every subsequent claim then allocates
+// an even-further-ahead sequence, simulate rejects again, and the submitter
+// loops forever never advancing.
+//
+// This method resets the counter to:
+//
+//	chainSeq + count(rows for sender where status='submitted' AND sequence_number >= chainSeq)
+//
+// The +N is the number of transactions we've broadcast that the chain
+// hasn't indexed yet. Lowering to chainSeq alone would let the next claim
+// collide with an in-flight submit; including the pending count keeps
+// sequences monotonic across the reset.
+//
+// Runs in a single SQL transaction so the count-of-submitted and the counter
+// update are consistent even under concurrent worker activity.
+func (s *Store) ForceResetSequenceToChain(ctx context.Context, senderAddress string, chainSeq uint64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var inflight uint64
+	err = tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM transactions
+		WHERE sender_address = ?
+		  AND status = ?
+		  AND sequence_number IS NOT NULL
+		  AND sequence_number >= ?
+	`, senderAddress, string(store.StatusSubmitted), chainSeq).Scan(&inflight)
+	if err != nil {
+		return err
+	}
+
+	target := chainSeq + inflight
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE account_sequences SET next_sequence = ?, updated_at = UTC_TIMESTAMP(3)
+		WHERE sender_address = ?
+	`, target, senderAddress); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
 // RecoverStaleProcessing resets rows stuck in processing (e.g. worker crash)
 // back to queued. It also decrements the sequence counter for each affected
 // sender to avoid gaps.

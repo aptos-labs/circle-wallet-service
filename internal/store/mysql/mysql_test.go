@@ -30,8 +30,11 @@ func testDB(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	s := New(sqlDB)
-	t.Cleanup(func() { cleanTables(t, s) })
+	// Cleanup order matters: t.Cleanup runs LIFO, so register close LAST so
+	// it runs AFTER the per-test cleanTables. Otherwise cleanTables hits a
+	// closed DB.
 	t.Cleanup(func() { _ = sqlDB.Close() })
+	t.Cleanup(func() { cleanTables(t, s) })
 	return s
 }
 
@@ -304,6 +307,67 @@ func TestReconcileSequence(t *testing.T) {
 	}
 	if v := queryNextSeq(t, s, sender); v != 10 {
 		t.Fatalf("after 3: %d", v)
+	}
+}
+
+func TestForceResetSequenceToChain(t *testing.T) {
+	s := testDB(t)
+	ctx := context.Background()
+	sender := "0xforcereset"
+
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO account_sequences (sender_address, next_sequence) VALUES (?, ?)`, sender, 200); err != nil {
+		t.Fatal(err)
+	}
+
+	// No in-flight submitted rows — counter should snap straight to chainSeq.
+	if err := s.ForceResetSequenceToChain(ctx, sender, 42); err != nil {
+		t.Fatal(err)
+	}
+	if v := queryNextSeq(t, s, sender); v != 42 {
+		t.Fatalf("no-inflight reset: got %d want 42", v)
+	}
+
+	// Two in-flight submitted rows past the new chainSeq → counter should
+	// be chainSeq + 2 so the next claim doesn't collide with them.
+	createSubmittedRow(t, s, sender, 100, 50)
+	createSubmittedRow(t, s, sender, 101, 51)
+	// And one below the chainSeq threshold that must NOT be counted.
+	createSubmittedRow(t, s, sender, 102, 40)
+
+	if err := s.ForceResetSequenceToChain(ctx, sender, 50); err != nil {
+		t.Fatal(err)
+	}
+	if v := queryNextSeq(t, s, sender); v != 52 {
+		t.Fatalf("with-inflight reset: got %d want 52 (chain=50 + 2 inflight >=50)", v)
+	}
+}
+
+func createSubmittedRow(t *testing.T, s *Store, sender string, seedID int, seqNum uint64) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	rec := &store.TransactionRecord{
+		ID:             uuid.New().String(),
+		SenderAddress:  sender,
+		WalletID:       "wallet-1",
+		Status:         store.StatusSubmitted,
+		FunctionID:     "0x1::mod::entry",
+		PayloadJSON:    "{}",
+		SequenceNumber: &seqNum,
+		TxnHash:        "0xdeadbeef",
+		ExpiresAt:      now.Add(time.Hour),
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := s.Create(ctx, rec); err != nil {
+		t.Fatalf("seed submitted row %d: %v", seedID, err)
+	}
+	// Create seeds the row as whatever status is on the record, but if your
+	// Create enforces "queued" we'd need to flip it. Normalize here.
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE transactions SET status = ?, sequence_number = ? WHERE id = ?`,
+		string(store.StatusSubmitted), seqNum, rec.ID); err != nil {
+		t.Fatalf("flip to submitted: %v", err)
 	}
 }
 
