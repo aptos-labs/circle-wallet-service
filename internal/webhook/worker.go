@@ -6,13 +6,16 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -38,33 +41,122 @@ func NewWorker(ws WebhookStore, maxRetries int, timeout time.Duration, signingSe
 		secret = []byte(signingSecret)
 	}
 	return &Worker{
-		store:         ws,
-		httpClient:    &http.Client{Timeout: timeout, Transport: transport},
+		store: ws,
+		httpClient: &http.Client{
+			Timeout:       timeout,
+			Transport:     transport,
+			CheckRedirect: ssrfSafeCheckRedirect,
+		},
 		maxRetries:    maxRetries,
 		signingSecret: secret,
 		logger:        logger,
 	}
 }
 
-// ssrfSafeDialer returns a DialContext that rejects connections to private/loopback addresses.
+// maxWebhookRedirects bounds how many redirects we'll follow for a single
+// delivery. Real webhook receivers rarely redirect more than once or twice;
+// setting a low cap limits exposure to redirect-chain probing.
+const maxWebhookRedirects = 5
+
+// isPrivateIP reports whether the given IP is one we refuse to POST to.
+// Covers loopback, RFC1918 private, link-local unicast/multicast, and the
+// unspecified address (0.0.0.0 / ::).
+func isPrivateIP(ip net.IP) bool {
+	return ip == nil ||
+		ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified()
+}
+
+// ssrfSafeDialer returns a DialContext that rejects connections to
+// private/loopback addresses. It resolves the hostname, vets every returned
+// IP, and then dials the first vetted IP directly — so the transport's TCP
+// connect is guaranteed to reach the address we actually checked (closes the
+// DNS-rebinding TOCTOU window that a "resolve-then-hand-hostname-back" pattern
+// would leave open).
 func ssrfSafeDialer(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: timeout}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, _, err := net.SplitHostPort(addr)
+		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, fmt.Errorf("webhook: invalid address %q: %w", addr, err)
+		}
+		// If addr is already an IP literal, skip the DNS lookup.
+		if ip := net.ParseIP(host); ip != nil {
+			if isPrivateIP(ip) {
+				return nil, fmt.Errorf("webhook: refusing to connect to private address %s", ip)
+			}
+			return dialer.DialContext(ctx, network, addr)
 		}
 		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 		if err != nil {
 			return nil, fmt.Errorf("webhook: resolve %q: %w", host, err)
 		}
 		for _, ip := range ips {
-			if ip.IP.IsLoopback() || ip.IP.IsPrivate() || ip.IP.IsLinkLocalUnicast() || ip.IP.IsLinkLocalMulticast() {
+			if isPrivateIP(ip.IP) {
 				return nil, fmt.Errorf("webhook: refusing to connect to private address %s", ip.IP)
 			}
 		}
-		return dialer.DialContext(ctx, network, addr)
+		// Dial the first resolved IP directly so the underlying connect
+		// cannot re-resolve to a private IP between our check and the dial.
+		var lastErr error
+		for _, ip := range ips {
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("no usable addresses for %q", host)
+		}
+		return nil, lastErr
 	}
+}
+
+// ssrfSafeCheckRedirect is the http.Client.CheckRedirect hook. It runs before
+// each redirect is followed, giving us a second chance to reject a Location
+// header that points at a private/loopback address or at a non-http(s) scheme.
+// The dialer would also refuse to connect to a private IP at this point, but
+// checking the parsed URL up-front yields a clearer error and rejects bad
+// schemes that the dialer never sees.
+func ssrfSafeCheckRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxWebhookRedirects {
+		return fmt.Errorf("webhook: stopped after %d redirects", maxWebhookRedirects)
+	}
+	return validateRedirectURL(req.URL)
+}
+
+func validateRedirectURL(u *url.URL) error {
+	if u == nil {
+		return errors.New("webhook: redirect has no URL")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("webhook: refusing redirect to scheme %q", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("webhook: redirect URL has no host")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isPrivateIP(ip) {
+			return fmt.Errorf("webhook: refusing redirect to private address %s", ip)
+		}
+		return nil
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(context.Background(), host)
+	if err != nil {
+		return fmt.Errorf("webhook: resolve redirect host %q: %w", host, err)
+	}
+	for _, ip := range ips {
+		if isPrivateIP(ip.IP) {
+			return fmt.Errorf("webhook: refusing redirect to private address %s", ip.IP)
+		}
+	}
+	return nil
 }
 
 // Run starts the delivery loop. It blocks until ctx is cancelled. On each tick
