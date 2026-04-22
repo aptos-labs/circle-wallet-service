@@ -38,7 +38,7 @@ func ParseAddress(s string) (aptossdk.AccountAddress, error) {
 
 func SerializeArgument(typeStr string, value any) ([]byte, error) {
 	switch {
-	case typeStr == "address" || strings.HasPrefix(typeStr, "0x1::object::Object"):
+	case typeStr == "address" || isObjectType(typeStr):
 		return serializeAddress(value)
 	case typeStr == "bool":
 		return serializeBool(value)
@@ -73,6 +73,32 @@ func ParseTypeTags(tags []string) ([]aptossdk.TypeTag, error) {
 		result[i] = *tag
 	}
 	return result, nil
+}
+
+// isObjectType reports whether typeStr names an Aptos framework Object<T>,
+// which BCS-serializes as a 32-byte address (Object is declared as
+// `struct Object<phantom T> { inner: address }`). Nodes are free to render
+// the 0x1 address in either short ("0x1") or long (64-hex) form, and in
+// practice some ABIs include spacing inside the type parameters, so we parse
+// the struct path instead of prefix-matching the raw string.
+func isObjectType(typeStr string) bool {
+	// Strip the type parameter list, if any, before splitting.
+	base := typeStr
+	if i := strings.Index(base, "<"); i >= 0 {
+		base = base[:i]
+	}
+	parts := strings.Split(base, "::")
+	if len(parts) != 3 {
+		return false
+	}
+	if parts[1] != "object" || parts[2] != "Object" {
+		return false
+	}
+	addr, err := ParseAddress(parts[0])
+	if err != nil {
+		return false
+	}
+	return addr == aptossdk.AccountOne
 }
 
 func serializeAddress(value any) ([]byte, error) {
