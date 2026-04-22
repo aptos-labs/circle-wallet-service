@@ -314,6 +314,8 @@ type mockQueue struct {
 
 	updateErr error
 
+	updateIfStatusFn func(ctx context.Context, rec *store.TransactionRecord, expected store.TxnStatus) (bool, error)
+
 	lastUpdate  *store.TransactionRecord
 	shiftCount  int
 	shiftSender string
@@ -383,7 +385,21 @@ func (m *mockQueue) ShiftSenderSequences(ctx context.Context, senderAddress stri
 
 func (m *mockQueue) Create(ctx context.Context, rec *store.TransactionRecord) error { return nil }
 func (m *mockQueue) UpdateIfStatus(ctx context.Context, rec *store.TransactionRecord, expectedStatus store.TxnStatus) (bool, error) {
-	return false, nil
+	m.mu.Lock()
+	fn := m.updateIfStatusFn
+	err := m.updateErr
+	if err == nil && fn == nil {
+		cp := *rec
+		m.lastUpdate = &cp
+	}
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, rec, expectedStatus)
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (m *mockQueue) Get(ctx context.Context, id string) (*store.TransactionRecord, error) {
@@ -945,6 +961,47 @@ func TestSubmitSigned_Success(t *testing.T) {
 	}
 	if mq.lastUpdate == nil || mq.lastUpdate.Status != store.StatusSubmitted || mq.lastUpdate.TxnHash != "0xabc" {
 		t.Fatalf("update %+v", mq.lastUpdate)
+	}
+}
+
+func TestSubmitSigned_RowNoLongerProcessingBailsWithoutBroadcast(t *testing.T) {
+	t.Parallel()
+	rec := &store.TransactionRecord{
+		ID:            "sub-race",
+		SenderAddress: "0x1",
+		Status:        store.StatusProcessing,
+		CreatedAt:     time.Now().UTC(),
+	}
+	// Simulate RecoverStaleProcessing winning the race while we were signing:
+	// the row is no longer in processing, so UpdateIfStatus is a no-op.
+	mq := &mockQueue{
+		updateIfStatusFn: func(context.Context, *store.TransactionRecord, store.TxnStatus) (bool, error) {
+			return false, nil
+		},
+	}
+	submit := &fakeSubmitter{hash: "MUST_NOT_BE_BROADCAST"}
+	s := &Submitter{
+		queue:    mq,
+		txSubmit: submit,
+		logger:   slog.New(slog.DiscardHandler),
+	}
+	ok := s.submitSigned(context.Background(), &signedItem{
+		rec:       rec,
+		signedTxn: &aptossdk.SignedTransaction{},
+		seqNum:    1,
+		hash:      "0xabc",
+	})
+	if ok {
+		t.Fatal("expected submitSigned to return false when row is no longer processing")
+	}
+	if mq.lastUpdate != nil {
+		t.Fatalf("unexpected Update call: %+v — must not mutate a row owned by the recovery path", mq.lastUpdate)
+	}
+	if mq.releaseCount != 0 {
+		t.Fatalf("ReleaseSequence called %d times, want 0 — recovery path already decremented the counter", mq.releaseCount)
+	}
+	if rec.TxnHash != "" {
+		t.Fatalf("expected in-memory TxnHash cleared, got %q", rec.TxnHash)
 	}
 }
 

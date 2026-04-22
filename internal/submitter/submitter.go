@@ -500,15 +500,39 @@ func (s *Submitter) submitSigned(ctx context.Context, item *signedItem) bool {
 	// Pre-persist the hash before broadcast. The hash was computed during
 	// signing (see prepareRecord) and is now durably written so that any
 	// post-submit failure can be recovered by the poller without re-signing.
+	//
+	// The persist is conditional on status=processing. If a slow Circle
+	// signing round-trip lets RecoverStaleProcessing fire against this row
+	// first, the row has already been flipped back to queued and the
+	// counter decremented — broadcasting our signed transaction now would
+	// burn a sequence the next claim will reuse, producing a duplicate
+	// on-chain submission. When UpdateIfStatus reports no-op we bail out
+	// cleanly: the row belongs to the recovery path and a later dispatcher
+	// tick will re-claim it at a fresh sequence.
 	item.rec.TxnHash = item.hash
 	item.rec.UpdatedAt = time.Now().UTC()
-	if err := s.queue.Update(ctx, item.rec); err != nil {
+	updated, err := s.queue.UpdateIfStatus(ctx, item.rec, store.StatusProcessing)
+	if err != nil {
 		// Nothing has hit the chain yet; clear the in-memory hash and
 		// requeue transiently so the next attempt starts clean.
 		s.logger.Error("submitter: pre-submit hash persist failed",
 			"id", item.rec.ID, "hash", item.hash, "error", err)
 		item.rec.TxnHash = ""
 		s.requeueTransient(ctx, item.rec, fmt.Errorf("persist pre-submit hash: %w", err))
+		return false
+	}
+	if !updated {
+		// Row is no longer in processing — recover/sweep won the race while
+		// we were signing. Counter was already decremented by the winner;
+		// do NOT ReleaseSequence here (that would decrement twice) and do
+		// NOT broadcast. The row sits in queued with sequence_number=NULL
+		// and will be re-claimed on the next tick.
+		s.logger.Warn("submitter: pre-submit hash persist skipped; row no longer in processing",
+			"id", item.rec.ID,
+			"hash", item.hash,
+			"sequence", item.seqNum,
+		)
+		item.rec.TxnHash = ""
 		return false
 	}
 
