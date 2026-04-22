@@ -824,12 +824,25 @@ func (s *Submitter) applyReconcile(ctx context.Context, rec *store.TransactionRe
 	// Re-queue all processing (claimed) records for this sender so they get
 	// fresh sequence numbers after the reconcile. See the invariant comment
 	// above for why requeueWithoutRelease is load-bearing here.
+	//
+	// Rows with txn_hash set are deliberately skipped. A processing row with
+	// a hash means the submitter already pre-persisted and broadcast the
+	// signed transaction to chain — clearing the sequence and re-queueing
+	// would cause the next worker to re-sign at a fresh sequence, producing
+	// a second on-chain broadcast for the same logical request. The poller's
+	// processing+hash recovery path owns those rows; reconcile must keep its
+	// hands off them for the same reason sweepOrphanedProcessing does.
 	processing, lErr := s.queue.ListByStatus(ctx, store.StatusProcessing)
 	if lErr == nil {
 		for _, p := range processing {
-			if p.SenderAddress == rec.SenderAddress && p.ID != rec.ID {
-				s.requeueWithoutRelease(ctx, p)
+			if p.SenderAddress != rec.SenderAddress || p.ID == rec.ID {
+				continue
 			}
+			if p.TxnHash != "" {
+				// Already broadcast; poller confirms by hash.
+				continue
+			}
+			s.requeueWithoutRelease(ctx, p)
 		}
 	}
 
