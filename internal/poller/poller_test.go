@@ -18,11 +18,14 @@ type mockTxnFetcher struct {
 	calls int
 }
 
-func (m *mockTxnFetcher) TransactionByHash(hash string) (*api.Transaction, error) {
+func (m *mockTxnFetcher) TransactionByHashCtx(ctx context.Context, hash string) (*api.Transaction, error) {
 	m.mu.Lock()
 	m.calls++
 	fn := m.fn
 	m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if fn != nil {
 		return fn(hash)
 	}

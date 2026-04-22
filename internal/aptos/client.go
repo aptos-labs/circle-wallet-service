@@ -285,6 +285,36 @@ func (c *Client) TransactionByHash(hash string) (*api.Transaction, error) {
 	return c.Inner.TransactionByHash(hash)
 }
 
+// TransactionByHashCtx wraps TransactionByHash with context cancellation.
+//
+// The underlying SDK's TransactionByHash accepts no context; it is bounded
+// only by the SDK's HTTP client timeout. For callers that run on a ticker
+// (the poller) we need the stronger guarantee that a hung or unresponsive
+// node can't pin the caller goroutine for the full HTTP timeout — the
+// poller's sweep is single-threaded and rate-limited, so one stuck lookup
+// stalls the whole tick.
+//
+// The call itself runs in a goroutine and may continue after ctx is
+// cancelled; the goroutine unblocks once the SDK's HTTP client hits its own
+// timeout, which is acceptable because the caller has already moved on.
+func (c *Client) TransactionByHashCtx(ctx context.Context, hash string) (*api.Transaction, error) {
+	type result struct {
+		txn *api.Transaction
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		txn, err := c.Inner.TransactionByHash(hash)
+		ch <- result{txn: txn, err: err}
+	}()
+	select {
+	case r := <-ch:
+		return r.txn, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 var viewHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // View calls the Aptos /view endpoint with BCS-serialized arguments.
