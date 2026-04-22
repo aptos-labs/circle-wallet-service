@@ -59,6 +59,20 @@ func NewABICache(client aptos.AptosRpcClient) *ABICache {
 // fetching the module ABI from the node on first access. Signer parameters are
 // included in the raw ABI and must be stripped by the caller.
 func (c *ABICache) GetFunctionParams(addr *aptos.AccountAddress, module, function string) ([]string, error) {
+	mod, err := c.getModule(*addr, module)
+	if err != nil {
+		return nil, err
+	}
+	return lookupFunction(mod, function)
+}
+
+// getModule returns the ABI for addr::module, serving from cache when possible
+// and falling back to a node fetch on miss or TTL expiry. It is the single
+// entry point that both GetFunctionParams and BuildEntryFunctionPayload go
+// through, so a warm cache benefits every code path that resolves a Move
+// module — previously BuildEntryFunctionPayload fetched unconditionally,
+// burning a node round-trip per queued transaction.
+func (c *ABICache) getModule(addr aptos.AccountAddress, module string) (*api.MoveModule, error) {
 	key := addr.StringLong() + "::" + module
 
 	// Fast path: live cache hit → promote and return.
@@ -67,13 +81,13 @@ func (c *ABICache) GetFunctionParams(addr *aptos.AccountAddress, module, functio
 		c.lru.MoveToFront(entry.elem)
 		mod := entry.module
 		c.mu.Unlock()
-		return lookupFunction(mod, function)
+		return mod, nil
 	}
 	c.mu.Unlock()
 
 	// Slow path: fetch outside the lock so concurrent misses for other keys
 	// aren't serialized behind a network round-trip.
-	mod, err := c.fetchModule(*addr, module)
+	mod, err := c.fetchModule(addr, module)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +95,7 @@ func (c *ABICache) GetFunctionParams(addr *aptos.AccountAddress, module, functio
 	c.mu.Lock()
 	c.storeLocked(key, mod)
 	c.mu.Unlock()
-	return lookupFunction(mod, function)
+	return mod, nil
 }
 
 // storeLocked inserts/refreshes an entry and enforces the size cap.
@@ -128,14 +142,15 @@ func (c *ABICache) fetchModule(address aptos.AccountAddress, module string) (*ap
 	return moduleData.Abi, nil
 }
 
-// BuildEntryFunctionPayload parses functionId ("addr::mod::fn"), fetches the
-// module ABI, and constructs an [aptos.EntryFunction] with BCS-serialized arguments.
+// BuildEntryFunctionPayload parses functionId ("addr::mod::fn"), resolves the
+// module ABI (cache-first), and constructs an [aptos.EntryFunction] with
+// BCS-serialized arguments.
 func (c *ABICache) BuildEntryFunctionPayload(functionId string, typeArgs []string, args []any) (*aptos.EntryFunction, error) {
 	moduleAddr, moduleName, functionName, err := ParseFunctionID(functionId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse functionID %w", err)
 	}
-	abi, err := c.fetchModule(*moduleAddr, moduleName)
+	abi, err := c.getModule(*moduleAddr, moduleName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch module abi %w", err)
 	}
