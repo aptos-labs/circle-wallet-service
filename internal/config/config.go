@@ -104,6 +104,10 @@ type WebhookConfig struct {
 	GlobalURL      string `yaml:"global_url"`
 	MaxRetries     int    `yaml:"max_retries"`
 	TimeoutSeconds int    `yaml:"timeout_seconds"`
+	// SigningSecret is the shared secret used to compute the HMAC-SHA256
+	// signature attached to every outbound delivery. When empty, deliveries
+	// are sent without a signature header. Set via WEBHOOK_SIGNING_SECRET.
+	SigningSecret string `yaml:"signing_secret"`
 }
 
 type RateLimitConfig struct {
@@ -244,6 +248,9 @@ func applyEnvOverrides(c *Config) error {
 	}
 	if v, ok := os.LookupEnv("WEBHOOK_URL"); ok {
 		c.Webhook.GlobalURL = strings.TrimSpace(v)
+	}
+	if v, ok := os.LookupEnv("WEBHOOK_SIGNING_SECRET"); ok {
+		c.Webhook.SigningSecret = v
 	}
 	if v, ok := os.LookupEnv("MAX_GAS_AMOUNT"); ok {
 		n, err := strconv.ParseUint(strings.TrimSpace(v), 10, 64)
@@ -416,6 +423,10 @@ func (c *Config) WebhookMaxRetries() int {
 
 func (c *Config) WebhookTimeoutSeconds() int {
 	return c.Webhook.TimeoutSeconds
+}
+
+func (c *Config) WebhookSigningSecret() string {
+	return c.Webhook.SigningSecret
 }
 
 func (c *Config) RateLimitEnabled() bool {
