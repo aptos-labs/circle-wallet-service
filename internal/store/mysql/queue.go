@@ -234,10 +234,7 @@ func (s *Store) ForceResetSequenceToChain(ctx context.Context, senderAddress str
 // pathological case where the counter has already been reconciled with chain
 // state that's lower than the recovered count.
 func (s *Store) RecoverStaleProcessing(ctx context.Context, olderThan time.Duration) (int64, error) {
-	sec := int64(olderThan / time.Second)
-	if sec < 1 {
-		sec = 1
-	}
+	sec := max(int64(olderThan/time.Second), 1)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -250,12 +247,18 @@ func (s *Store) RecoverStaleProcessing(ctx context.Context, olderThan time.Durat
 		}
 	}()
 
+	// Lock the actual stale rows — not an aggregate. MySQL's FOR UPDATE on a
+	// GROUP BY query is implementation-defined (it may fail outright, or lock
+	// a derived table rather than the source rows). Selecting (id,
+	// sender_address) directly gives us row-level locks on exactly the rows
+	// we're about to update, so the subsequent UPDATE by id cannot collide
+	// with a concurrent worker claiming or mutating them.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT sender_address, COUNT(*) FROM transactions
+		SELECT id, sender_address FROM transactions
 		WHERE status = ? AND sequence_number IS NOT NULL
 		  AND (txn_hash IS NULL OR txn_hash = '')
 		  AND updated_at < (UTC_TIMESTAMP(3) - INTERVAL ? SECOND)
-		GROUP BY sender_address
+		ORDER BY id
 		FOR UPDATE
 	`, string(store.StatusProcessing), sec)
 	if err != nil {
@@ -264,26 +267,45 @@ func (s *Store) RecoverStaleProcessing(ctx context.Context, olderThan time.Durat
 	defer func() {
 		_ = rows.Close()
 	}()
+	var ids []string
 	senderCounts := make(map[string]int64)
 	for rows.Next() {
-		var addr string
-		var cnt int64
-		if err := rows.Scan(&addr, &cnt); err != nil {
+		var id, addr string
+		if err := rows.Scan(&id, &addr); err != nil {
 			return 0, err
 		}
-		senderCounts[addr] = cnt
+		ids = append(ids, id)
+		senderCounts[addr]++
 	}
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		if err := tx.Commit(); err != nil {
+			return 0, err
+		}
+		committed = true
+		return 0, nil
+	}
 
-	res, err := tx.ExecContext(ctx, `
-		UPDATE transactions
+	// Build "UPDATE ... WHERE id IN (?, ?, …)" with the exact ids we locked.
+	placeholders := make([]byte, 0, 2*len(ids)-1)
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, string(store.StatusQueued))
+	for i, id := range ids {
+		if i > 0 {
+			placeholders = append(placeholders, ',')
+		}
+		placeholders = append(placeholders, '?')
+		args = append(args, id)
+	}
+	q := `UPDATE transactions
 		SET status = ?, sequence_number = NULL, updated_at = UTC_TIMESTAMP(3)
-		WHERE status = ?
-		  AND (txn_hash IS NULL OR txn_hash = '')
-		  AND updated_at < (UTC_TIMESTAMP(3) - INTERVAL ? SECOND)
-	`, string(store.StatusQueued), string(store.StatusProcessing), sec)
+		WHERE id IN (` + string(placeholders) + `)`
+	res, err := tx.ExecContext(ctx, q, args...)
 	if err != nil {
 		return 0, err
 	}
