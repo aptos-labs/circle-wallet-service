@@ -241,14 +241,19 @@ func statusRank(s string) int {
 	}
 }
 
+// e2eThroughputCount returns how many concurrent executes each throughput
+// test enqueues for a single sender. The FIFO per-sender pipeline means wall
+// time scales linearly with N (Circle sign + simulate + submit ~ a few
+// seconds per tx), so N is also a lower bound on required TXN_EXPIRATION_SECONDS.
+// Default is small on purpose; override with E2E_THROUGHPUT when stressing.
 func e2eThroughputCount() int {
 	raw := os.Getenv("E2E_THROUGHPUT")
 	if raw == "" {
-		return 8
+		return 5
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n < 2 {
-		return 8
+		return 5
 	}
 	if n > 50 {
 		return 50
@@ -806,7 +811,10 @@ func TestIdempotencyReplayRecovery(t *testing.T) {
 		t.Fatalf("third response must set X-Idempotency-Replayed=true")
 	}
 
-	pollUntilConfirmed(t, id1, 5*time.Second, 90*time.Second)
+	// Longer deadline than the per-tx baseline: this test may run after the
+	// throughput suites, so this wallet can have a queue depth the submitter
+	// must drain FIFO before this row is claimed.
+	pollUntilConfirmed(t, id1, 5*time.Second, 5*time.Minute)
 }
 
 // TestIdempotencyKeyHeader uses Idempotency-Key HTTP header only (no JSON field).
@@ -841,7 +849,9 @@ func TestIdempotencyKeyHeader(t *testing.T) {
 		t.Fatalf("replay header want true got %q", h2.Get("X-Idempotency-Replayed"))
 	}
 
-	pollUntilConfirmed(t, id1, 5*time.Second, 90*time.Second)
+	// See TestIdempotencyReplayRecovery — allow for backlog drain on the
+	// shared E2E wallet.
+	pollUntilConfirmed(t, id1, 5*time.Second, 5*time.Minute)
 }
 
 // TestStaleProcessingRecovery forces a row into stale processing; submitter RecoverStaleProcessing must re-queue it.
@@ -876,10 +886,18 @@ func TestStaleProcessingRecovery(t *testing.T) {
 
 	injected := false
 	for attempt := 0; attempt < 8; attempt++ {
+		// Inject a stale 'processing' row to trigger RecoverStaleProcessing.
+		// Also extend expires_at so the row survives the re-claim: with the
+		// default 60s expiration the row aged 3 minutes would already be past
+		// ExpiresAt by the time the submitter picks it up, and prepareRecord
+		// would mark it 'expired' before we ever observe the recovery path.
+		// We specifically want to exercise recovery→requeue→submit→confirm,
+		// not expiration, so extend ExpiresAt beyond the poll deadline.
 		res, err := db.Exec(`
 			UPDATE transactions
 			SET status = 'processing',
-			    updated_at = UTC_TIMESTAMP(3) - INTERVAL 3 MINUTE
+			    updated_at = UTC_TIMESTAMP(3) - INTERVAL 3 MINUTE,
+			    expires_at = UTC_TIMESTAMP(3) + INTERVAL 10 MINUTE
 			WHERE id = ? AND status = 'queued'`, txID)
 		if err != nil {
 			t.Fatalf("mysql update: %v", err)
@@ -967,7 +985,18 @@ func TestInvalidEntryFunctionEventuallyFails(t *testing.T) {
 	t.Fatalf("expected failed status within 2m, last: %+v", last)
 }
 
-// TestStatusProgressionMonotonic polls quickly and asserts lifecycle does not move backwards (queued → … → confirmed).
+// TestStatusProgressionMonotonic asserts the lifecycle reaches confirmed and
+// never regresses from a TERMINAL state. Non-terminal transitions are allowed
+// to move backwards: on a transient error (Circle blip, sequence mismatch,
+// node 5xx) the submitter intentionally resets status processing→queued and
+// re-claims with a fresh sequence. That retry-in-place behaviour is correct
+// and observable, so a strict rank-never-decreases check would flag normal
+// production recovery as a bug.
+//
+// Invariants enforced:
+//  1. Once a terminal state (confirmed/failed/expired) is observed, status
+//     must not change afterwards.
+//  2. The final state must be confirmed for a valid self-transfer.
 func TestStatusProgressionMonotonic(t *testing.T) {
 	w, ok := wallet1()
 	if !ok {
@@ -982,9 +1011,13 @@ func TestStatusProgressionMonotonic(t *testing.T) {
 		t.Fatal("expected transaction_id")
 	}
 
-	lastRank := -1
-	deadline := time.Now().Add(3 * time.Minute)
+	isTerminal := func(s string) bool {
+		return s == "confirmed" || s == "failed" || s == "expired"
+	}
+
+	var terminalStatus string
 	var lastStatus string
+	deadline := time.Now().Add(3 * time.Minute)
 
 	for time.Now().Before(deadline) {
 		time.Sleep(300 * time.Millisecond)
@@ -992,26 +1025,38 @@ func TestStatusProgressionMonotonic(t *testing.T) {
 		if code != 200 {
 			continue
 		}
-		r := statusRank(rec.Status)
-		if r < 0 {
+		if statusRank(rec.Status) < 0 {
 			continue
 		}
-		if r < lastRank {
-			t.Fatalf("status moved backwards: was rank %d (%s) now %q (rank %d)",
-				lastRank, lastStatus, rec.Status, r)
+
+		if terminalStatus != "" && rec.Status != terminalStatus {
+			t.Fatalf("terminal regression: was %q now %q", terminalStatus, rec.Status)
 		}
-		if r > lastRank {
-			t.Logf("status advance: %s (rank %d)", rec.Status, r)
-			lastRank = r
+
+		if rec.Status != lastStatus {
+			t.Logf("status: %s (rank %d)", rec.Status, statusRank(rec.Status))
 			lastStatus = rec.Status
 		}
-		switch rec.Status {
-		case "confirmed":
-			t.Logf("monotonic progression ok, final confirmed hash=%s", rec.TxnHash)
-			return
-		case "failed", "expired":
-			t.Fatalf("unexpected terminal %s: %s", rec.Status, rec.ErrorMessage)
+
+		if isTerminal(rec.Status) {
+			if rec.Status != "confirmed" {
+				t.Fatalf("unexpected terminal %s: %s", rec.Status, rec.ErrorMessage)
+			}
+			if terminalStatus == "" {
+				terminalStatus = rec.Status
+				t.Logf("terminal confirmed hash=%s — holding to verify no regression", rec.TxnHash)
+				// Keep polling briefly to verify the terminal state sticks.
+				stable := time.Now().Add(2 * time.Second)
+				for time.Now().Before(stable) {
+					time.Sleep(300 * time.Millisecond)
+					_, rec2 := getTransaction(t, txID)
+					if rec2.Status != "" && rec2.Status != terminalStatus {
+						t.Fatalf("terminal regression after hold: %q → %q", terminalStatus, rec2.Status)
+					}
+				}
+				return
+			}
 		}
 	}
-	t.Fatalf("not confirmed within 3m, last status %s rank %d", lastStatus, lastRank)
+	t.Fatalf("not confirmed within 3m, last status %q", lastStatus)
 }

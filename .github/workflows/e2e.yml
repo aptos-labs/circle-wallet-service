@@ -57,6 +57,12 @@ jobs:
       # bypass pre-submit simulation if debugging.
       SIMULATE_BEFORE_SUBMIT: "true"
       CALIBRATE_GAS_FROM_SIMULATION: "true"
+      # Throughput tests enqueue N txs per sender and they drain FIFO. With the
+      # default 60s expiry, the tail of an 8-deep queue blows past the cutoff
+      # against live Circle + testnet latency and fails with
+      # "transaction expired before submit" — a test-env timing artifact, not a
+      # real system bug. 600s gives comfortable headroom for CI.
+      TXN_EXPIRATION_SECONDS: "600"
       E2E_BASE_URL: http://127.0.0.1:8080
       E2E_API_KEY: ${{ secrets.API_KEY }}
       E2E_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/jcci_e2e?parseTime=true
@@ -71,8 +77,16 @@ jobs:
         id: gate
         shell: bash
         run: |
-          if [[ -z "${CIRCLE_API_KEY}" || -z "${CIRCLE_ENTITY_SECRET}" || -z "${APTOS_NODE_URL}" || -z "${CIRCLE_WALLETS}" || -z "${API_KEY}" ]]; then
-            echo "E2E secrets not fully configured — skipping (set API_KEY, APTOS_NODE_URL, CIRCLE_API_KEY, CIRCLE_ENTITY_SECRET, CIRCLE_WALLETS)."
+          # Report exactly which required secrets are empty (not which GitHub name is wrong).
+          missing=()
+          [[ -z "${API_KEY}" ]] && missing+=("API_KEY")
+          [[ -z "${APTOS_NODE_URL}" ]] && missing+=("APTOS_NODE_URL")
+          [[ -z "${CIRCLE_API_KEY}" ]] && missing+=("CIRCLE_API_KEY")
+          [[ -z "${CIRCLE_ENTITY_SECRET}" ]] && missing+=("CIRCLE_ENTITY_SECRET")
+          [[ -z "${CIRCLE_WALLETS}" ]] && missing+=("CIRCLE_WALLETS")
+          if (( ${#missing[@]} > 0 )); then
+            echo "E2E secrets not fully configured — empty in this job: ${missing[*]}"
+            echo "Add the corresponding repository secrets and ensure this workflow run is allowed to receive them (same-repo PR/push, not a fork PR)."
             echo "skip=1" >> "$GITHUB_OUTPUT"
           else
             echo "skip=0" >> "$GITHUB_OUTPUT"
