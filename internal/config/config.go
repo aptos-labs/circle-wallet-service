@@ -265,6 +265,16 @@ func applyEnvOverrides(c *Config) error {
 		}
 		c.Submitter.CalibrateGasFromSimulation = b
 	}
+	// Submitter retry budget is checked against time.Since(CreatedAt). Useful to
+	// override in environments with long sign/submit latency (E2E against real
+	// Circle + testnet) without touching YAML.
+	if v, ok := os.LookupEnv("SUBMITTER_MAX_RETRY_DURATION_SECONDS"); ok {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return fmt.Errorf("SUBMITTER_MAX_RETRY_DURATION_SECONDS: %w", err)
+		}
+		c.Submitter.MaxRetryDurationSeconds = n
+	}
 	return nil
 }
 
