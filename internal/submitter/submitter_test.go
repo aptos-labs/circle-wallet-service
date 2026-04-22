@@ -326,6 +326,9 @@ type mockQueue struct {
 	reconcileCount int
 	reconcileSeq   uint64
 
+	forceResetCount int
+	forceResetSeq   uint64
+
 	listByStatus func(ctx context.Context, status store.TxnStatus) ([]*store.TransactionRecord, error)
 }
 
@@ -406,6 +409,14 @@ func (m *mockQueue) ReconcileSequence(ctx context.Context, senderAddress string,
 	m.mu.Lock()
 	m.reconcileCount++
 	m.reconcileSeq = chainSeq
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *mockQueue) ForceResetSequenceToChain(ctx context.Context, senderAddress string, chainSeq uint64) error {
+	m.mu.Lock()
+	m.forceResetCount++
+	m.forceResetSeq = chainSeq
 	m.mu.Unlock()
 	return nil
 }
@@ -1190,5 +1201,56 @@ func TestApplyReconcile_DoesNotReleaseCounter(t *testing.T) {
 	}
 	if otherSender.SequenceNumber == nil || *otherSender.SequenceNumber != 9 {
 		t.Fatalf("otherSender sequence_number mutated, got %v", otherSender.SequenceNumber)
+	}
+	// chainSeq >= localSeq path: ForceResetSequenceToChain must NOT be used
+	// here — that would snap the counter DOWN past pending siblings.
+	if mq.forceResetCount != 0 {
+		t.Fatalf("ForceResetSequenceToChain called %d times, want 0 on chain-ahead path", mq.forceResetCount)
+	}
+}
+
+// TestApplyReconcile_ChainBehind_ResetsCounter covers the infinite-loop bug
+// where our counter has drifted AHEAD of chain (e.g. a run of simulate
+// SEQUENCE_NUMBER_TOO_NEW rejections each burning a slot). In that case the
+// GREATEST-only ReconcileSequence is a no-op and the next claim allocates
+// an even-further-ahead seq, looping forever. applyReconcile must instead
+// call ForceResetSequenceToChain to snap the counter back to chain truth.
+func TestApplyReconcile_ChainBehind_ResetsCounter(t *testing.T) {
+	t.Parallel()
+	seq := uint64(264)
+	rec := &store.TransactionRecord{
+		ID:             "rec-drifted",
+		SenderAddress:  "0xabc",
+		Status:         store.StatusProcessing,
+		SequenceNumber: &seq,
+	}
+	mq := &mockQueue{
+		listByStatus: func(_ context.Context, _ store.TxnStatus) ([]*store.TransactionRecord, error) {
+			return []*store.TransactionRecord{rec}, nil
+		},
+	}
+	s := &Submitter{queue: mq, logger: slog.New(slog.DiscardHandler)}
+
+	// local=264, chain=85 → drift=-179. The fix must go through
+	// ForceResetSequenceToChain, not ReconcileSequence.
+	s.applyReconcile(context.Background(), rec, 264, 85)
+
+	if mq.forceResetCount != 1 {
+		t.Fatalf("ForceResetSequenceToChain called %d times, want 1", mq.forceResetCount)
+	}
+	if mq.forceResetSeq != 85 {
+		t.Fatalf("ForceResetSequenceToChain chainSeq=%d, want 85", mq.forceResetSeq)
+	}
+	if mq.reconcileCount != 0 {
+		t.Fatalf("ReconcileSequence called %d times, want 0 — chain is behind, GREATEST is a no-op and would leave the counter stuck", mq.reconcileCount)
+	}
+	if mq.releaseCount != 0 {
+		t.Fatalf("ReleaseSequence called %d times, want 0", mq.releaseCount)
+	}
+	if mq.lastUpdate == nil || mq.lastUpdate.Status != store.StatusQueued {
+		t.Fatalf("record must be requeued, got %+v", mq.lastUpdate)
+	}
+	if mq.lastUpdate.SequenceNumber != nil {
+		t.Fatalf("record sequence_number must be cleared, got %d", *mq.lastUpdate.SequenceNumber)
 	}
 }

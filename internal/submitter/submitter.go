@@ -712,13 +712,32 @@ func (s *Submitter) applyReconcile(ctx context.Context, rec *store.TransactionRe
 		"drift", int64(chainSeq)-int64(localSeq),
 	)
 
-	if err := s.queue.ReconcileSequence(ctx, rec.SenderAddress, chainSeq); err != nil {
-		s.logger.Error("submitter: reconcile sequence", "id", rec.ID, "error", err)
+	// When the chain is BEHIND what we just tried (drift < 0 — most commonly
+	// caused by a run of SEQUENCE_NUMBER_TOO_NEW simulations burning slots
+	// without landing) GREATEST is a no-op and every retry allocates a
+	// further-ahead sequence. ForceResetSequenceToChain snaps the counter
+	// down to chainSeq + in-flight-count so the next claim reuses a valid
+	// slot. When the chain is at or ahead of us the original one-way-up
+	// ReconcileSequence keeps counter monotonicity safe.
+	if chainSeq < localSeq {
+		if err := s.queue.ForceResetSequenceToChain(ctx, rec.SenderAddress, chainSeq); err != nil {
+			s.logger.Error("submitter: force reset sequence", "id", rec.ID, "error", err)
+		} else {
+			s.logger.Info("submitter: reset counter (chain-behind)",
+				"sender", rec.SenderAddress,
+				"chain_seq", chainSeq,
+				"local_seq_used", localSeq,
+			)
+		}
 	} else {
-		s.logger.Info("submitter: reconciled counter",
-			"sender", rec.SenderAddress,
-			"counter_raised_to_at_least", chainSeq,
-		)
+		if err := s.queue.ReconcileSequence(ctx, rec.SenderAddress, chainSeq); err != nil {
+			s.logger.Error("submitter: reconcile sequence", "id", rec.ID, "error", err)
+		} else {
+			s.logger.Info("submitter: reconciled counter",
+				"sender", rec.SenderAddress,
+				"counter_raised_to_at_least", chainSeq,
+			)
+		}
 	}
 
 	// Re-queue all processing (claimed) records for this sender so they get

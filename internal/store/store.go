@@ -92,6 +92,14 @@ type Queue interface {
 	// ReconcileSequence advances the local sequence counter to at least chainSeq
 	// (GREATEST). Used after an on-chain lookup to correct drift.
 	ReconcileSequence(ctx context.Context, senderAddress string, chainSeq uint64) error
+	// ForceResetSequenceToChain resets the local sequence counter to exactly
+	// chainSeq plus the number of in-flight "submitted" rows for this sender
+	// whose sequence_number is >= chainSeq. Used when the counter has drifted
+	// AHEAD of chain state (e.g. after repeated simulate-SEQUENCE_NUMBER_TOO_NEW
+	// rejections) and must be lowered so the next claim allocates a sequence
+	// the chain will accept. Preserving the in-flight count prevents the
+	// snap-down from colliding with transactions we've already broadcast.
+	ForceResetSequenceToChain(ctx context.Context, senderAddress string, chainSeq uint64) error
 	// RecoverStaleProcessing resets transactions stuck in "processing" longer than
 	// olderThan back to "queued" and decrements the sequence counter accordingly.
 	RecoverStaleProcessing(ctx context.Context, olderThan time.Duration) (int64, error)
