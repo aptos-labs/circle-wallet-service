@@ -250,12 +250,21 @@ func (s *Store) RecoverStaleProcessing(ctx context.Context, olderThan time.Durat
 	// Lock the actual stale rows — not an aggregate. MySQL's FOR UPDATE on a
 	// GROUP BY query is implementation-defined (it may fail outright, or lock
 	// a derived table rather than the source rows). Selecting (id,
-	// sender_address) directly gives us row-level locks on exactly the rows
-	// we're about to update, so the subsequent UPDATE by id cannot collide
-	// with a concurrent worker claiming or mutating them.
+	// sender_address, sequence_number) directly gives us row-level locks on
+	// exactly the rows we're about to update, so the subsequent UPDATE by id
+	// cannot collide with a concurrent worker claiming or mutating them.
+	//
+	// We deliberately recover rows regardless of whether sequence_number is
+	// set: the usual production case is a post-claim crash (sequence set), but
+	// the recovery path also serves as a defense-in-depth safety net for rows
+	// that somehow landed in `processing` without a sequence (operator
+	// intervention, bad migration, a future claim-path bug). Skipping them
+	// would strand them forever. The counter decrement below only fires for
+	// rows that actually burned a sequence, so we don't drift the counter
+	// when rescuing no-sequence zombies.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, sender_address FROM transactions
-		WHERE status = ? AND sequence_number IS NOT NULL
+		SELECT id, sender_address, sequence_number FROM transactions
+		WHERE status = ?
 		  AND (txn_hash IS NULL OR txn_hash = '')
 		  AND updated_at < (UTC_TIMESTAMP(3) - INTERVAL ? SECOND)
 		ORDER BY id
@@ -271,11 +280,17 @@ func (s *Store) RecoverStaleProcessing(ctx context.Context, olderThan time.Durat
 	senderCounts := make(map[string]int64)
 	for rows.Next() {
 		var id, addr string
-		if err := rows.Scan(&id, &addr); err != nil {
+		var seq sql.NullInt64
+		if err := rows.Scan(&id, &addr, &seq); err != nil {
 			return 0, err
 		}
 		ids = append(ids, id)
-		senderCounts[addr]++
+		// Only decrement the per-sender counter for rows that actually burned
+		// a sequence during claim. Rows with NULL sequence_number never
+		// advanced the counter, so decrementing would introduce drift.
+		if seq.Valid {
+			senderCounts[addr]++
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return 0, err
