@@ -194,6 +194,67 @@ func TestSweep_ContextCancelAborts(t *testing.T) {
 	}
 }
 
+// TestArchiverAgainstMemoryStore wires the Archiver against the real
+// MemoryStore implementation so we catch anything that slips past the
+// fakeStore (interface drift, wrong argument order, cursor bugs, etc.).
+//
+// Strategy: we can't backdate a row via MemoryStore's public API (Create and
+// Update both stamp UpdatedAt=now). Instead we create rows at "now", sleep
+// past a small retention window, then configure the Archiver with millisecond
+// retention so everything we seeded now qualifies as aged.
+func TestArchiverAgainstMemoryStore(t *testing.T) {
+	ms := store.NewMemoryStore(time.Hour)
+	defer func() { _ = ms.Close() }()
+	ctx := context.Background()
+
+	mk := func(id string, status store.TxnStatus, key string) {
+		t.Helper()
+		rec := &store.TransactionRecord{
+			ID: id, Status: status, IdempotencyKey: key,
+			SenderAddress: "0x1", FunctionID: "f", WalletID: "w", PayloadJSON: "{}",
+		}
+		if err := ms.Create(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("fresh-a", store.StatusConfirmed, "ka")
+	mk("fresh-b", store.StatusConfirmed, "kb")
+	mk("non-terminal", store.StatusSubmitted, "kc")
+	mk("no-key", store.StatusFailed, "")
+
+	// Sleep so all seeded rows age past the tiny retention windows below.
+	time.Sleep(25 * time.Millisecond)
+
+	a := New(ms, Config{
+		Tick:                 time.Hour,
+		Retention:            10 * time.Millisecond,
+		IdempotencyRetention: 5 * time.Millisecond,
+		BatchSize:            100,
+	}, quietLogger())
+
+	a.sweep(ctx)
+
+	// Terminal rows (fresh-a, fresh-b, no-key) must be purged. Non-terminal stays.
+	for _, gone := range []string{"fresh-a", "fresh-b", "no-key"} {
+		got, _ := ms.Get(ctx, gone)
+		if got != nil {
+			t.Errorf("%s should have been purged; still present: %+v", gone, got)
+		}
+	}
+	got, _ := ms.Get(ctx, "non-terminal")
+	if got == nil {
+		t.Error("non-terminal row was wrongly purged")
+	} else if got.IdempotencyKey != "kc" {
+		t.Errorf("non-terminal row key was wrongly cleared: %+v", got)
+	}
+	// Idempotency index must not retain pointers to purged rows.
+	for _, k := range []string{"ka", "kb"} {
+		if got, _ := ms.GetByIdempotencyKey(ctx, k); got != nil {
+			t.Errorf("index still points to purged row for key %s", k)
+		}
+	}
+}
+
 func TestNew_DefaultsApplied(t *testing.T) {
 	fs := &fakeStore{}
 	a := New(fs, Config{}, quietLogger())
