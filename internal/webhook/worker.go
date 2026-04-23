@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,20 +26,25 @@ type Worker struct {
 	store         WebhookStore
 	httpClient    *http.Client
 	maxRetries    int
+	concurrency   int
 	signingSecret []byte // HMAC-SHA256 key; nil disables signing
 	logger        *slog.Logger
 }
 
 // NewWorker builds a Worker. signingSecret is the shared HMAC-SHA256 key used
 // to sign outbound deliveries; when empty, deliveries are sent without a
-// signature header (useful for dev/tests).
-func NewWorker(ws WebhookStore, maxRetries int, timeout time.Duration, signingSecret string, logger *slog.Logger) *Worker {
+// signature header (useful for dev/tests). concurrency caps how many
+// deliveries run in parallel per batch tick; <=0 means serial.
+func NewWorker(ws WebhookStore, maxRetries int, timeout time.Duration, concurrency int, signingSecret string, logger *slog.Logger) *Worker {
 	transport := &http.Transport{
 		DialContext: ssrfSafeDialer(timeout),
 	}
 	var secret []byte
 	if signingSecret != "" {
 		secret = []byte(signingSecret)
+	}
+	if concurrency < 1 {
+		concurrency = 1
 	}
 	return &Worker{
 		store: ws,
@@ -48,6 +54,7 @@ func NewWorker(ws WebhookStore, maxRetries int, timeout time.Duration, signingSe
 			CheckRedirect: ssrfSafeCheckRedirect,
 		},
 		maxRetries:    maxRetries,
+		concurrency:   concurrency,
 		signingSecret: secret,
 		logger:        logger,
 	}
@@ -202,9 +209,30 @@ func (w *Worker) processBatch(ctx context.Context) {
 		w.logger.Error("webhook worker: claim deliveries", "error", err)
 		return
 	}
-	for _, rec := range records {
-		w.deliver(ctx, rec)
+	if len(records) == 0 {
+		return
 	}
+	// Bound the fan-out with a semaphore so a single large batch can't spin
+	// up one goroutine per record — the underlying http.Client already has a
+	// finite connection pool and uncapped concurrency would just queue at the
+	// transport. This also caps memory growth when ClaimPendingDeliveries is
+	// tuned to return larger batches.
+	sem := make(chan struct{}, w.concurrency)
+	var wg sync.WaitGroup
+	for _, rec := range records {
+		select {
+		case <-ctx.Done():
+			return
+		case sem <- struct{}{}:
+		}
+		wg.Add(1)
+		go func(r *DeliveryRecord) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			w.deliver(ctx, r)
+		}(rec)
+	}
+	wg.Wait()
 }
 
 func (w *Worker) deliver(ctx context.Context, rec *DeliveryRecord) {

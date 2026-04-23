@@ -24,7 +24,7 @@ func parseURL(s string) (*url.URL, error) { return url.Parse(s) }
 // Redirect validation (CheckRedirect) is preserved so redirect behavior can be exercised
 // against loopback httptest servers.
 func newTestWorker(ws WebhookStore, maxRetries int, timeout time.Duration, logger *slog.Logger) *Worker {
-	w := NewWorker(ws, maxRetries, timeout, "", logger)
+	w := NewWorker(ws, maxRetries, timeout, 1, "", logger)
 	w.httpClient = &http.Client{
 		Timeout:       timeout,
 		CheckRedirect: ssrfSafeCheckRedirect,
@@ -315,7 +315,7 @@ func TestDeliver_SignsWithHMAC(t *testing.T) {
 		Status: "pending", NextRetryAt: now, CreatedAt: now,
 	}
 	ms := &mockWorkerStore{}
-	w := NewWorker(ms, 5, 5*time.Second, secret, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := NewWorker(ms, 5, 5*time.Second, 1, secret, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	w.httpClient = &http.Client{Timeout: 5 * time.Second} // bypass SSRF dialer for httptest
 
 	before := time.Now().UTC().Unix()
@@ -457,7 +457,7 @@ func TestDeliver_RejectsTooManyRedirects(t *testing.T) {
 		Status: "pending", NextRetryAt: now, CreatedAt: now,
 	}
 	ms := &mockWorkerStore{}
-	w := NewWorker(ms, 3, 2*time.Second, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := NewWorker(ms, 3, 2*time.Second, 1, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	// Replace transport+redirect with a loopback-tolerant variant that still caps hops.
 	w.httpClient = &http.Client{
 		Timeout: 2 * time.Second,
