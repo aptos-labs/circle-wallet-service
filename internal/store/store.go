@@ -86,6 +86,19 @@ type Store interface {
 	// long past the tick interval. Callers process one page, then pass the
 	// last row's (updated_at, id) as the next cursor.
 	ListByStatusPaged(ctx context.Context, status TxnStatus, limit int, afterUpdatedAt time.Time, afterID string) ([]*TransactionRecord, error)
+	// PurgeTerminalOlderThan deletes up to `limit` rows in a terminal status
+	// (confirmed, failed, expired) whose updated_at is older than `cutoff`,
+	// returning the number of rows removed. Used by the archive worker to
+	// bound transaction-table growth once rows have aged past the retention
+	// window. Relies on ON DELETE CASCADE to sweep dependent webhook rows.
+	PurgeTerminalOlderThan(ctx context.Context, cutoff time.Time, limit int) (int64, error)
+	// ClearIdempotencyOlderThan NULLs the idempotency_key column on up to
+	// `limit` terminal rows whose updated_at is older than `cutoff`, returning
+	// the number of rows touched. Runs on a shorter retention window than
+	// PurgeTerminalOlderThan so the UNIQUE(idempotency_key) slot is freed up
+	// earlier than the row itself (keeping the audit row around a while longer
+	// while letting callers reuse the key).
+	ClearIdempotencyOlderThan(ctx context.Context, cutoff time.Time, limit int) (int64, error)
 	Close() error
 }
 

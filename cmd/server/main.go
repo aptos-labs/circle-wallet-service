@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aptos-labs/jc-contract-integration/internal/aptos"
+	"github.com/aptos-labs/jc-contract-integration/internal/archive"
 	circle2 "github.com/aptos-labs/jc-contract-integration/internal/circle"
 	"github.com/aptos-labs/jc-contract-integration/internal/config"
 	"github.com/aptos-labs/jc-contract-integration/internal/db"
@@ -143,6 +144,21 @@ func run(logger *slog.Logger) error {
 	}
 
 	go webhookWorker.Run(ctx)
+
+	// Archive worker (optional, off by default). Bounds transactions-table
+	// growth by deleting terminal rows older than the retention window and
+	// NULLing idempotency keys after a shorter window so UNIQUE slots are
+	// freed up earlier than the full-row purge.
+	if cfg.ArchiveEnabled() {
+		day := 24 * time.Hour
+		archiver := archive.New(memStore, archive.Config{
+			Tick:                 time.Duration(cfg.ArchiveTickSeconds()) * time.Second,
+			Retention:            time.Duration(cfg.ArchiveRetentionDays()) * day,
+			IdempotencyRetention: time.Duration(cfg.ArchiveIdempotencyRetentionDays()) * day,
+			BatchSize:            cfg.ArchiveBatchSize(),
+		}, logger)
+		go archiver.Run(ctx)
+	}
 
 	mux := http.NewServeMux()
 	if aptosClient != nil && circleSigner != nil {
