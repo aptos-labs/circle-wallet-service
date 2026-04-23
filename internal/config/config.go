@@ -124,6 +124,14 @@ type WebhookConfig struct {
 	// signature attached to every outbound delivery. When empty, deliveries
 	// are sent without a signature header. Set via WEBHOOK_SIGNING_SECRET.
 	SigningSecret string `yaml:"signing_secret"`
+	// DeliveryConcurrency caps how many webhook deliveries run in parallel
+	// within a single processBatch tick. The serial-per-batch default meant
+	// one slow endpoint (full TimeoutSeconds to fail) would block every
+	// other delivery behind it, stretching the effective latency of a batch
+	// of N deliveries to N * TimeoutSeconds. A bounded pool keeps the
+	// slowest customer from pinning the queue for everyone else. <=0
+	// falls back to 1 (serial).
+	DeliveryConcurrency int `yaml:"delivery_concurrency"`
 }
 
 type RateLimitConfig struct {
@@ -184,9 +192,10 @@ func defaultConfig() *Config {
 			RPCBurst:             10,
 		},
 		Webhook: WebhookConfig{
-			GlobalURL:      "",
-			MaxRetries:     5,
-			TimeoutSeconds: 10,
+			GlobalURL:           "",
+			MaxRetries:          5,
+			TimeoutSeconds:      10,
+			DeliveryConcurrency: 4,
 		},
 		RateLimit: RateLimitConfig{
 			Enabled:           false,
@@ -483,6 +492,13 @@ func (c *Config) WebhookTimeoutSeconds() int {
 
 func (c *Config) WebhookSigningSecret() string {
 	return c.Webhook.SigningSecret
+}
+
+func (c *Config) WebhookDeliveryConcurrency() int {
+	if c.Webhook.DeliveryConcurrency <= 0 {
+		return 1
+	}
+	return c.Webhook.DeliveryConcurrency
 }
 
 func (c *Config) RateLimitEnabled() bool {
