@@ -31,12 +31,12 @@ import (
 
 // Archiver trims terminal transaction rows from the store.
 type Archiver struct {
-	store                    store.Store
-	tick                     time.Duration
-	retention                time.Duration
-	idempotencyRetention     time.Duration
-	batchSize                int
-	logger                   *slog.Logger
+	store                store.Store
+	tick                 time.Duration
+	retention            time.Duration
+	idempotencyRetention time.Duration
+	batchSize            int
+	logger               *slog.Logger
 }
 
 // Config holds runtime parameters. All durations are positive; non-positive

@@ -70,15 +70,19 @@ func (s *fakeStore) Update(context.Context, *store.TransactionRecord) error { re
 func (s *fakeStore) UpdateIfStatus(context.Context, *store.TransactionRecord, store.TxnStatus) (bool, error) {
 	return false, errNotUsed
 }
+
 func (s *fakeStore) Get(context.Context, string) (*store.TransactionRecord, error) {
 	return nil, errNotUsed
 }
+
 func (s *fakeStore) GetByIdempotencyKey(context.Context, string) (*store.TransactionRecord, error) {
 	return nil, errNotUsed
 }
+
 func (s *fakeStore) ListByStatus(context.Context, store.TxnStatus) ([]*store.TransactionRecord, error) {
 	return nil, errNotUsed
 }
+
 func (s *fakeStore) ListByStatusPaged(context.Context, store.TxnStatus, int, time.Time, string) ([]*store.TransactionRecord, error) {
 	return nil, errNotUsed
 }
@@ -123,7 +127,7 @@ func TestSweep_UsesExpectedCutoffs(t *testing.T) {
 
 func TestSweep_LoopsUntilBatchShort(t *testing.T) {
 	fs := &fakeStore{
-		idempQueue: []int64{10, 10, 3},   // 3 calls, last is short
+		idempQueue: []int64{10, 10, 3},     // 3 calls, last is short
 		purgeQueue: []int64{10, 10, 10, 0}, // 4 calls, last is short
 	}
 	a := New(fs, Config{
