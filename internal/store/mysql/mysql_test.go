@@ -4,6 +4,7 @@ package mysql
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"sort"
 	"sync"
@@ -286,6 +287,132 @@ func TestRecoverStaleProcessing(t *testing.T) {
 	}
 	if got.Status != store.StatusQueued || got.SequenceNumber != nil {
 		t.Fatalf("after recover: %+v", got)
+	}
+}
+
+// TestRecoverStaleProcessing_NoSequenceNumber covers the defense-in-depth case
+// where a row ends up in processing without a sequence_number — e.g. operator
+// intervention, a future claim-path bug, or the E2E TestStaleProcessingRecovery
+// injection path. Such rows must be rescued (otherwise they wedge forever), and
+// because they never burned a sequence, the per-sender counter must NOT be
+// decremented (decrementing would drift the counter below truth).
+func TestRecoverStaleProcessing_NoSequenceNumber(t *testing.T) {
+	s := testDB(t)
+	ctx := context.Background()
+	sender := "0xnoseq"
+
+	// Seed the sender's counter at 5 so we can assert it stays at 5 after
+	// recovery (no decrement).
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO account_sequences (sender_address, next_sequence) VALUES (?, ?)`,
+		sender, 5); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := testTxn(sender, store.StatusQueued)
+	if err := s.Create(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	// Flip to processing WITHOUT setting sequence_number (mirrors the E2E
+	// injection path). updated_at 120s ago so it crosses the threshold.
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE transactions SET status = ?,
+			updated_at = UTC_TIMESTAMP(3) - INTERVAL 120 SECOND WHERE id = ?`,
+		string(store.StatusProcessing), rec.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.RecoverStaleProcessing(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 row recovered, got %d", n)
+	}
+
+	got, err := s.Get(ctx, rec.ID)
+	if err != nil || got == nil {
+		t.Fatalf("get after recover: %+v err=%v", got, err)
+	}
+	if got.Status != store.StatusQueued || got.SequenceNumber != nil {
+		t.Fatalf("row not reset to queued: %+v", got)
+	}
+
+	// Counter must be unchanged at 5 — the stranded row never burned a sequence.
+	if v := queryNextSeq(t, s, sender); v != 5 {
+		t.Fatalf("counter drifted: got %d want 5", v)
+	}
+}
+
+// TestRecoverStaleProcessing_MixedSequencedAndNot verifies that a single sweep
+// correctly handles a batch containing both kinds of stale rows: the counter
+// is decremented only by the count of rows that actually had a sequence.
+func TestRecoverStaleProcessing_MixedSequencedAndNot(t *testing.T) {
+	s := testDB(t)
+	ctx := context.Background()
+	sender := "0xmixed"
+
+	// Counter seeded at 10.
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO account_sequences (sender_address, next_sequence) VALUES (?, ?)`,
+		sender, 10); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two rows with sequence; one without.
+	seqRows := []struct {
+		seq sql.NullInt64
+	}{
+		{sql.NullInt64{Int64: 7, Valid: true}},
+		{sql.NullInt64{Int64: 8, Valid: true}},
+		{},
+	}
+	var ids []string
+	for _, r := range seqRows {
+		rec := testTxn(sender, store.StatusQueued)
+		if err := s.Create(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, rec.ID)
+		if r.seq.Valid {
+			if _, err := s.db.ExecContext(ctx, `
+				UPDATE transactions SET status = ?, sequence_number = ?,
+					updated_at = UTC_TIMESTAMP(3) - INTERVAL 120 SECOND WHERE id = ?`,
+				string(store.StatusProcessing), r.seq.Int64, rec.ID); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			if _, err := s.db.ExecContext(ctx, `
+				UPDATE transactions SET status = ?,
+					updated_at = UTC_TIMESTAMP(3) - INTERVAL 120 SECOND WHERE id = ?`,
+				string(store.StatusProcessing), rec.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	n, err := s.RecoverStaleProcessing(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Fatalf("expected 3 rows recovered, got %d", n)
+	}
+
+	// All three rows are now queued with cleared sequence.
+	for _, id := range ids {
+		got, err := s.Get(ctx, id)
+		if err != nil || got == nil {
+			t.Fatalf("get %s: %+v err=%v", id, got, err)
+		}
+		if got.Status != store.StatusQueued || got.SequenceNumber != nil {
+			t.Fatalf("row %s not reset: %+v", id, got)
+		}
+	}
+
+	// Counter decremented by 2 (two sequenced rows) — NOT by 3.
+	if v := queryNextSeq(t, s, sender); v != 8 {
+		t.Fatalf("counter: got %d want 8 (10 - 2 sequenced)", v)
 	}
 }
 
