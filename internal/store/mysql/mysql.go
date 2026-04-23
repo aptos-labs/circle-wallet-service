@@ -237,6 +237,49 @@ func (s *Store) ListByStatusPaged(ctx context.Context, status store.TxnStatus, l
 	return out, rows.Err()
 }
 
+// PurgeTerminalOlderThan deletes a capped batch of terminal-status rows older
+// than the given cutoff. The DELETE … LIMIT keeps the statement short enough
+// to avoid locking the table for long on large backlogs; the archive worker
+// loops until a tick returns fewer than `limit` rows.
+//
+// Webhook rows are removed via the ON DELETE CASCADE FK on fk_webhook_txn, so
+// the archive worker only has to touch the transactions table.
+func (s *Store) PurgeTerminalOlderThan(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM transactions
+		WHERE status IN ('confirmed', 'failed', 'expired')
+		  AND updated_at < ?
+		LIMIT ?`, cutoff, limit)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// ClearIdempotencyOlderThan NULLs the idempotency_key on a capped batch of
+// terminal rows older than cutoff. Frees UNIQUE(idempotency_key) slots well
+// before the full-row purge so clients can reuse keys once they're confident
+// no retry is outstanding.
+func (s *Store) ClearIdempotencyOlderThan(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE transactions
+		SET idempotency_key = NULL
+		WHERE status IN ('confirmed', 'failed', 'expired')
+		  AND idempotency_key IS NOT NULL
+		  AND updated_at < ?
+		LIMIT ?`, cutoff, limit)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func scanRecord(row *sql.Row) (*store.TransactionRecord, error) {
 	var rec store.TransactionRecord
 	var statusStr string

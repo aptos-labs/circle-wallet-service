@@ -213,6 +213,65 @@ func (s *MemoryStore) ListByStatusPaged(_ context.Context, status TxnStatus, lim
 	return matched, nil
 }
 
+// PurgeTerminalOlderThan deletes up to `limit` terminal-status records with
+// UpdatedAt before cutoff and returns the number removed. Rows are scanned in
+// no particular order; callers that need determinism should rely on the
+// limit+retry pattern the archive worker uses.
+func (s *MemoryStore) PurgeTerminalOlderThan(_ context.Context, cutoff time.Time, limit int) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var removed int64
+	for id, rec := range s.records {
+		if limit > 0 && removed >= int64(limit) {
+			break
+		}
+		if !isTerminal(rec.Status) {
+			continue
+		}
+		if !rec.UpdatedAt.Before(cutoff) {
+			continue
+		}
+		if rec.IdempotencyKey != "" {
+			delete(s.idempotencyIdx, rec.IdempotencyKey)
+		}
+		delete(s.records, id)
+		removed++
+	}
+	return removed, nil
+}
+
+// ClearIdempotencyOlderThan NULLs the IdempotencyKey on up to `limit` terminal
+// records older than cutoff, returning the number modified.
+func (s *MemoryStore) ClearIdempotencyOlderThan(_ context.Context, cutoff time.Time, limit int) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var cleared int64
+	for _, rec := range s.records {
+		if limit > 0 && cleared >= int64(limit) {
+			break
+		}
+		if !isTerminal(rec.Status) {
+			continue
+		}
+		if rec.IdempotencyKey == "" {
+			continue
+		}
+		if !rec.UpdatedAt.Before(cutoff) {
+			continue
+		}
+		delete(s.idempotencyIdx, rec.IdempotencyKey)
+		rec.IdempotencyKey = ""
+		cleared++
+	}
+	return cleared, nil
+}
+
+func isTerminal(s TxnStatus) bool {
+	return s == StatusConfirmed || s == StatusFailed || s == StatusExpired
+}
+
 // Close stops the background reaper goroutine.
 func (s *MemoryStore) Close() error {
 	close(s.done)

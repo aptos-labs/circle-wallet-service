@@ -144,6 +144,41 @@ type WebhookConfig struct {
 	DeliveryConcurrency int `yaml:"delivery_concurrency"`
 }
 
+// ArchiveConfig governs the background archive worker that trims old
+// terminal-status rows from the transactions table.
+//
+// The worker runs in two stages per tick:
+//  1. NULL idempotency_key on rows older than IdempotencyRetentionDays
+//     (frees UNIQUE slots while keeping the audit row).
+//  2. DELETE rows older than RetentionDays (cascades to webhook_deliveries
+//     via fk_webhook_txn ON DELETE CASCADE).
+//
+// Without an archive sweep the transactions table grows unbounded — a
+// production backlog of millions of confirmed rows eventually hurts every
+// query that touches the table (plus the UNIQUE(idempotency_key) index).
+type ArchiveConfig struct {
+	// Enabled opts into the archive worker. Off by default because the right
+	// retention window is operator-specific (compliance / audit needs).
+	Enabled bool `yaml:"enabled"`
+	// TickSeconds sets how often the archive loop wakes up. One sweep is
+	// cheap when nothing's aged past retention, so a low-frequency tick
+	// (5 min) is fine.
+	TickSeconds int `yaml:"tick_seconds"`
+	// RetentionDays is how long a terminal row (confirmed/failed/expired)
+	// sticks around before being deleted. Default 30 days.
+	RetentionDays int `yaml:"retention_days"`
+	// IdempotencyRetentionDays is the shorter window after which only the
+	// idempotency_key is NULLed on a terminal row. Must be <= RetentionDays
+	// to make sense; values above RetentionDays are ignored (the DELETE step
+	// would have already removed the row, taking its key with it).
+	// Default 7 days.
+	IdempotencyRetentionDays int `yaml:"idempotency_retention_days"`
+	// BatchSize caps each DELETE/UPDATE per tick so one sweep cannot hold
+	// the table's row locks for long. The worker loops within a tick until
+	// a batch comes back short. Default 1000.
+	BatchSize int `yaml:"batch_size"`
+}
+
 type RateLimitConfig struct {
 	Enabled           bool `yaml:"enabled"`
 	RequestsPerSecond int  `yaml:"requests_per_second"`
@@ -161,6 +196,7 @@ type Config struct {
 	Submitter   SubmitterConfig   `yaml:"submitter"`
 	Poller      PollerConfig      `yaml:"poller"`
 	Webhook     WebhookConfig     `yaml:"webhook"`
+	Archive     ArchiveConfig     `yaml:"archive"`
 	RateLimit   RateLimitConfig   `yaml:"rate_limit"`
 }
 
@@ -208,6 +244,13 @@ func defaultConfig() *Config {
 			MaxRetries:          5,
 			TimeoutSeconds:      10,
 			DeliveryConcurrency: 4,
+		},
+		Archive: ArchiveConfig{
+			Enabled:                  false,
+			TickSeconds:              300,
+			RetentionDays:            30,
+			IdempotencyRetentionDays: 7,
+			BatchSize:                1000,
 		},
 		RateLimit: RateLimitConfig{
 			Enabled:           false,
@@ -443,6 +486,38 @@ func (c *Config) PollerPageSize() int {
 		return c.Poller.PageSize
 	}
 	return 500
+}
+
+func (c *Config) ArchiveEnabled() bool {
+	return c.Archive.Enabled
+}
+
+func (c *Config) ArchiveTickSeconds() int {
+	if c.Archive.TickSeconds > 0 {
+		return c.Archive.TickSeconds
+	}
+	return 300
+}
+
+func (c *Config) ArchiveRetentionDays() int {
+	if c.Archive.RetentionDays > 0 {
+		return c.Archive.RetentionDays
+	}
+	return 30
+}
+
+func (c *Config) ArchiveIdempotencyRetentionDays() int {
+	if c.Archive.IdempotencyRetentionDays > 0 {
+		return c.Archive.IdempotencyRetentionDays
+	}
+	return 7
+}
+
+func (c *Config) ArchiveBatchSize() int {
+	if c.Archive.BatchSize > 0 {
+		return c.Archive.BatchSize
+	}
+	return 1000
 }
 
 func (c *Config) PollerSweepConcurrency() int {

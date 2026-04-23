@@ -424,6 +424,14 @@ func (m *mockQueue) ListByStatusPaged(ctx context.Context, status store.TxnStatu
 	return m.ListByStatus(ctx, status)
 }
 
+func (m *mockQueue) PurgeTerminalOlderThan(context.Context, time.Time, int) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockQueue) ClearIdempotencyOlderThan(context.Context, time.Time, int) (int64, error) {
+	return 0, nil
+}
+
 func (m *mockQueue) Close() error { return nil }
 
 func (m *mockQueue) ReconcileSequence(ctx context.Context, senderAddress string, chainSeq uint64) error {

@@ -82,6 +82,14 @@ func (s *stubStore) ListByStatusPaged(ctx context.Context, status store.TxnStatu
 	return s.ListByStatus(ctx, status)
 }
 
+func (s *stubStore) PurgeTerminalOlderThan(context.Context, time.Time, int) (int64, error) {
+	return 0, nil
+}
+
+func (s *stubStore) ClearIdempotencyOlderThan(context.Context, time.Time, int) (int64, error) {
+	return 0, nil
+}
+
 func (s *stubStore) UpdateIfStatus(ctx context.Context, rec *store.TransactionRecord, expected store.TxnStatus) (bool, error) {
 	s.updateIfCalls++
 	if s.updateIfFn != nil {
