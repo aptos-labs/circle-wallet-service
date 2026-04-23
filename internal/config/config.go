@@ -94,6 +94,16 @@ type SubmitterConfig struct {
 	// per txn. Defaults to true; only takes effect when SimulateBeforeSubmit is
 	// also enabled.
 	CalibrateGasFromSimulation bool `yaml:"calibrate_gas_from_simulation"`
+	// Per-call RPC timeouts. These exist so a single slow Circle or Aptos
+	// response can't pin a per-sender worker past the stale-processing
+	// threshold, which would otherwise let RecoverStaleProcessing race with
+	// an in-flight signing pipeline. Values are in seconds; <= 0 disables
+	// the timeout for that call.
+	CircleSignTimeoutSeconds         int `yaml:"circle_sign_timeout_seconds"`
+	AptosBuildTimeoutSeconds         int `yaml:"aptos_build_timeout_seconds"`
+	AptosSimulateTimeoutSeconds      int `yaml:"aptos_simulate_timeout_seconds"`
+	AptosSubmitTimeoutSeconds        int `yaml:"aptos_submit_timeout_seconds"`
+	AptosAccountLookupTimeoutSeconds int `yaml:"aptos_account_lookup_timeout_seconds"`
 }
 
 type PollerConfig struct {
@@ -153,15 +163,20 @@ func defaultConfig() *Config {
 			ExpirationSeconds: 60,
 		},
 		Submitter: SubmitterConfig{
-			PollIntervalMs:             200,
-			MaxRetryDurationSeconds:    300,
-			RetryIntervalSeconds:       5,
-			RetryJitterSeconds:         2,
-			StaleProcessingSeconds:     120,
-			RecoveryTickSeconds:        30,
-			SigningPipelineDepth:       4,
-			SimulateBeforeSubmit:       true,
-			CalibrateGasFromSimulation: true,
+			PollIntervalMs:                   200,
+			MaxRetryDurationSeconds:          300,
+			RetryIntervalSeconds:             5,
+			RetryJitterSeconds:               2,
+			StaleProcessingSeconds:           120,
+			RecoveryTickSeconds:              30,
+			SigningPipelineDepth:             4,
+			SimulateBeforeSubmit:             true,
+			CalibrateGasFromSimulation:       true,
+			CircleSignTimeoutSeconds:         15,
+			AptosBuildTimeoutSeconds:         10,
+			AptosSimulateTimeoutSeconds:      30,
+			AptosSubmitTimeoutSeconds:        10,
+			AptosAccountLookupTimeoutSeconds: 10,
 		},
 		Poller: PollerConfig{
 			IntervalSeconds:      5,
@@ -436,6 +451,26 @@ func (c *Config) SimulateBeforeSubmit() bool {
 
 func (c *Config) CalibrateGasFromSimulation() bool {
 	return c.Submitter.CalibrateGasFromSimulation
+}
+
+func (c *Config) CircleSignTimeoutSeconds() int {
+	return c.Submitter.CircleSignTimeoutSeconds
+}
+
+func (c *Config) AptosBuildTimeoutSeconds() int {
+	return c.Submitter.AptosBuildTimeoutSeconds
+}
+
+func (c *Config) AptosSimulateTimeoutSeconds() int {
+	return c.Submitter.AptosSimulateTimeoutSeconds
+}
+
+func (c *Config) AptosSubmitTimeoutSeconds() int {
+	return c.Submitter.AptosSubmitTimeoutSeconds
+}
+
+func (c *Config) AptosAccountLookupTimeoutSeconds() int {
+	return c.Submitter.AptosAccountLookupTimeoutSeconds
 }
 
 func (c *Config) WebhookMaxRetries() int {

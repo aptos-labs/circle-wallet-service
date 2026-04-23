@@ -28,8 +28,12 @@ type Notifier interface {
 // transactionSubmitter is the minimal slice of aptos.Client the consumer loop
 // depends on. Factored out so tests can inject a mock node without spinning up
 // the real HTTP client.
+//
+// The ctx variant is the one we actually call: it is wrapped with a per-call
+// timeout (AptosSubmitTimeoutSeconds) so a hung node can't stall the signing
+// pipeline past the stale-processing threshold.
 type transactionSubmitter interface {
-	SubmitTransaction(signed *aptossdk.SignedTransaction) (*api.SubmitTransactionResponse, error)
+	SubmitTransactionCtx(ctx context.Context, signed *aptossdk.SignedTransaction) (*api.SubmitTransactionResponse, error)
 }
 
 // signedItem is the unit of work passed from the signing producer to the
@@ -377,7 +381,9 @@ func (s *Submitter) prepareRecord(ctx context.Context, rec *store.TransactionRec
 		feePayerPubKey = fpPubKey
 	}
 
-	rawTxn, err := s.client.BuildFeePayerTransaction(senderAddr, feePayerAddr, payload, maxGas, useSeq)
+	buildCtx, cancelBuild := withTimeout(ctx, s.cfg.AptosBuildTimeoutSeconds())
+	rawTxn, err := s.client.BuildFeePayerTransactionCtx(buildCtx, senderAddr, feePayerAddr, payload, maxGas, useSeq)
+	cancelBuild()
 	if err != nil {
 		s.requeueTransient(ctx, rec, err)
 		return nil, true
@@ -395,7 +401,9 @@ func (s *Submitter) prepareRecord(ctx context.Context, rec *store.TransactionRec
 	// smaller). This reduces the per-transaction gas reserve without risking
 	// legitimate over-estimates from the VM.
 	if s.cfg.SimulateBeforeSubmit() {
-		userTxn, simErr := s.client.SimulateFeePayerTransaction(ctx, rawTxn, wallet.PublicKey, feePayerPubKey)
+		simCtx, cancelSim := withTimeout(ctx, s.cfg.AptosSimulateTimeoutSeconds())
+		userTxn, simErr := s.client.SimulateFeePayerTransaction(simCtx, rawTxn, wallet.PublicKey, feePayerPubKey)
+		cancelSim()
 		if simErr != nil {
 			if aptos.IsTransientSimulationError(simErr) {
 				s.requeueTransient(ctx, rec, fmt.Errorf("simulate: %w", simErr))
@@ -442,7 +450,9 @@ func (s *Submitter) prepareRecord(ctx context.Context, rec *store.TransactionRec
 		}
 	}
 
-	senderAuth, err := s.signer.SignTransaction(ctx, rawTxn, wallet.WalletID, wallet.PublicKey)
+	signCtx, cancelSign := withTimeout(ctx, s.cfg.CircleSignTimeoutSeconds())
+	senderAuth, err := s.signer.SignTransaction(signCtx, rawTxn, wallet.WalletID, wallet.PublicKey)
+	cancelSign()
 	if err != nil {
 		s.requeueTransient(ctx, rec, err)
 		return nil, true
@@ -450,7 +460,9 @@ func (s *Submitter) prepareRecord(ctx context.Context, rec *store.TransactionRec
 
 	var feePayerAuth *crypto.AccountAuthenticator
 	if hasSeparateFeePayer {
-		feePayerAuth, err = s.signer.SignTransaction(ctx, rawTxn, rec.FeePayerWalletID, feePayerPubKey)
+		fpSignCtx, cancelFpSign := withTimeout(ctx, s.cfg.CircleSignTimeoutSeconds())
+		feePayerAuth, err = s.signer.SignTransaction(fpSignCtx, rawTxn, rec.FeePayerWalletID, feePayerPubKey)
+		cancelFpSign()
 		if err != nil {
 			s.requeueTransient(ctx, rec, fmt.Errorf("fee-payer sign: %w", err))
 			return nil, true
@@ -550,7 +562,9 @@ func (s *Submitter) submitSigned(ctx context.Context, item *signedItem) bool {
 		"hash", item.hash,
 		"attempt", item.rec.AttemptCount,
 	)
-	submitResp, err := sub.SubmitTransaction(item.signedTxn)
+	submitCtx, cancelSubmit := withTimeout(ctx, s.cfg.AptosSubmitTimeoutSeconds())
+	submitResp, err := sub.SubmitTransactionCtx(submitCtx, item.signedTxn)
+	cancelSubmit()
 	if err != nil {
 		// Submit failed: nothing on chain. Clear the pre-persisted hash so
 		// downstream failure paths don't leave a stale hash on the row.
@@ -776,7 +790,9 @@ func (s *Submitter) reconcileAndRequeue(ctx context.Context, rec *store.Transact
 		"local_seq_used", localSeq,
 	)
 
-	info, err := s.client.Inner.Account(senderAddr)
+	acctCtx, cancelAcct := withTimeout(ctx, s.cfg.AptosAccountLookupTimeoutSeconds())
+	info, err := s.client.AccountCtx(acctCtx, senderAddr)
+	cancelAcct()
 	if err != nil {
 		s.logger.Error("submitter: fetch chain seq for reconcile", "id", rec.ID, "error", err)
 		s.requeueTransient(ctx, rec, fmt.Errorf("reconcile account info: %w", err))
@@ -909,7 +925,9 @@ func (s *Submitter) drainPipeline(ctx context.Context, ch <-chan signedItem, sen
 	if err != nil {
 		return
 	}
-	info, err := s.client.Inner.Account(senderAddr)
+	acctCtx, cancelAcct := withTimeout(ctx, s.cfg.AptosAccountLookupTimeoutSeconds())
+	info, err := s.client.AccountCtx(acctCtx, senderAddr)
+	cancelAcct()
 	if err != nil {
 		s.logger.Error("submitter: drain fetch chain seq", "sender", senderAddress, "error", err)
 		return
@@ -969,6 +987,24 @@ func isSequenceError(err error) bool {
 	return strings.Contains(msg, "sequence_number") ||
 		strings.Contains(msg, "sequence number") ||
 		strings.Contains(msg, "invalid_sequence")
+}
+
+// withTimeout returns a child context with the given per-call deadline, or
+// a cancellable copy of the parent when seconds <= 0 (timeout disabled).
+// The returned cancel func must always be called by the caller so that
+// resources are released even when the child ctx completes normally.
+//
+// This wraps every external RPC the submitter issues (Circle signing, Aptos
+// build/simulate/submit/account lookup) so that one unresponsive remote can't
+// pin a per-sender worker past SubmitterStaleProcessingSeconds. If that
+// happened, RecoverStaleProcessing would start racing the in-flight pipeline
+// for the same row and the duplicate-submit guards in submitSigned would be
+// the only thing between a slow node and a double broadcast.
+func withTimeout(parent context.Context, seconds int) (context.Context, context.CancelFunc) {
+	if seconds <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, time.Duration(seconds)*time.Second)
 }
 
 // retrySleep backs off between retries in the producer loop with jitter to
