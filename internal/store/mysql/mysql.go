@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/aptos-labs/jc-contract-integration/internal/store"
 	"github.com/go-sql-driver/mysql"
@@ -182,6 +183,43 @@ func (s *Store) ListByStatus(ctx context.Context, status store.TxnStatus) ([]*st
 			COALESCE(failure_kind, ''), COALESCE(vm_status, ''),
 			created_at, updated_at, expires_at, function_id
 		FROM transactions WHERE status = ?`, string(status))
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	var out []*store.TransactionRecord
+	for rows.Next() {
+		rec, err := scanRecordRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// ListByStatusPaged returns up to limit rows matching status, ordered by
+// (updated_at ASC, id ASC) and starting strictly after (afterUpdatedAt,
+// afterID). Backed by idx_status_updated (status, updated_at, id) so a
+// cursored page fetch is O(log n) + O(limit), not O(rows-matching-status).
+func (s *Store) ListByStatusPaged(ctx context.Context, status store.TxnStatus, limit int, afterUpdatedAt time.Time, afterID string) ([]*store.TransactionRecord, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, COALESCE(idempotency_key, ''), status, COALESCE(txn_hash, ''), sender_address, wallet_id,
+			COALESCE(fee_payer_wallet_id, ''), COALESCE(fee_payer_address, ''),
+			COALESCE(payload_json, ''), sequence_number, max_gas_amount,
+			COALESCE(error_message, ''), COALESCE(webhook_url, ''), attempt_count, COALESCE(last_error, ''),
+			COALESCE(failure_kind, ''), COALESCE(vm_status, ''),
+			created_at, updated_at, expires_at, function_id
+		FROM transactions
+		WHERE status = ?
+			AND (updated_at > ? OR (updated_at = ? AND id > ?))
+		ORDER BY updated_at ASC, id ASC
+		LIMIT ?`, string(status), afterUpdatedAt, afterUpdatedAt, afterID, limit)
 	if err != nil {
 		return nil, err
 	}

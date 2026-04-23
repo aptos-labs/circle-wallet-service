@@ -3,6 +3,7 @@ package poller
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/aptos-labs/aptos-go-sdk/api"
@@ -16,8 +17,7 @@ import (
 // TransactionByHash with context cancellation. The SDK's HTTP client has its
 // own total timeout, but without a context check a slow or unresponsive node
 // would pin this goroutine for the full HTTP timeout and stall the entire
-// poll tick (which is single-threaded, rate-limited, and iterates every
-// submitted row). Surfacing ctx here lets the poller drop the rest of the
+// poll tick. Surfacing ctx here lets the poller drop the rest of the
 // sweep cleanly on shutdown instead of waiting for the in-flight RPC.
 type aptosTxnClient interface {
 	TransactionByHashCtx(ctx context.Context, hash string) (*api.Transaction, error)
@@ -35,18 +35,36 @@ type notifyHook interface {
 // that can trigger 429/503 and cascade into false "lookup error" log spam.
 // A token-bucket rate limiter smooths the bursts; when it's nil, rate
 // limiting is disabled.
+//
+// The sweep is paginated and parallelized: each tick pages through matching
+// rows using ListByStatusPaged, and within each page a bounded worker pool
+// runs confirmRecord in parallel. The rate limiter remains the real
+// throughput ceiling — parallelism just prevents one slow node lookup from
+// stalling every record behind it.
 type Poller struct {
-	client   aptosTxnClient
-	store    store.Store
-	notifier notifyHook
-	interval time.Duration
-	limiter  *rate.Limiter
-	logger   *slog.Logger
+	client           aptosTxnClient
+	store            store.Store
+	notifier         notifyHook
+	interval         time.Duration
+	limiter          *rate.Limiter
+	pageSize         int
+	sweepConcurrency int
+	logger           *slog.Logger
 }
 
 // New builds a Poller. rpcRPS > 0 enables a token-bucket limiter with the
 // given steady-state rate and burst; rpcRPS == 0 disables limiting.
-func New(client aptosTxnClient, st store.Store, notifier notifyHook, interval time.Duration, rpcRPS, rpcBurst int, logger *slog.Logger) *Poller {
+// pageSize bounds the rows loaded per ListByStatusPaged call; sweepConcurrency
+// sizes the per-page worker pool.
+func New(
+	client aptosTxnClient,
+	st store.Store,
+	notifier notifyHook,
+	interval time.Duration,
+	rpcRPS, rpcBurst int,
+	pageSize, sweepConcurrency int,
+	logger *slog.Logger,
+) *Poller {
 	var limiter *rate.Limiter
 	if rpcRPS > 0 {
 		burst := rpcBurst
@@ -55,13 +73,21 @@ func New(client aptosTxnClient, st store.Store, notifier notifyHook, interval ti
 		}
 		limiter = rate.NewLimiter(rate.Limit(rpcRPS), burst)
 	}
+	if pageSize <= 0 {
+		pageSize = 500
+	}
+	if sweepConcurrency <= 0 {
+		sweepConcurrency = 1
+	}
 	return &Poller{
-		client:   client,
-		store:    st,
-		notifier: notifier,
-		interval: interval,
-		limiter:  limiter,
-		logger:   logger,
+		client:           client,
+		store:            st,
+		notifier:         notifier,
+		interval:         interval,
+		limiter:          limiter,
+		pageSize:         pageSize,
+		sweepConcurrency: sweepConcurrency,
+		logger:           logger,
 	}
 }
 
@@ -81,30 +107,88 @@ func (p *Poller) Run(ctx context.Context) {
 
 func (p *Poller) poll(ctx context.Context) {
 	// Primary path: records the submitter successfully flipped to submitted.
-	submitted, err := p.store.ListByStatus(ctx, store.StatusSubmitted)
-	if err != nil {
-		p.logger.Error("poller: list submitted", "error", err)
-		return
-	}
-	for _, rec := range submitted {
-		p.confirmRecord(ctx, rec, store.StatusSubmitted)
-	}
+	p.sweepStatus(ctx, store.StatusSubmitted, false)
 
 	// Recovery path: records whose post-submit status flip failed mid-flight.
 	// The submitter pre-persists txn_hash before broadcast, so a processing
 	// row with a non-empty hash has already hit the chain and must never be
 	// re-signed. Confirm them by on-chain lookup here.
-	processing, err := p.store.ListByStatus(ctx, store.StatusProcessing)
-	if err != nil {
-		p.logger.Error("poller: list processing", "error", err)
-		return
+	p.sweepStatus(ctx, store.StatusProcessing, true)
+}
+
+// sweepStatus pages through all rows in the given status and fans confirmRecord
+// out onto a bounded worker pool. requireHash skips records without a txn hash
+// (used for the processing recovery path — only pre-persisted hashes are safe
+// to confirm without re-signing).
+func (p *Poller) sweepStatus(ctx context.Context, status store.TxnStatus, requireHash bool) {
+	var (
+		cursorTime time.Time
+		cursorID   string
+	)
+	pageSize := p.pageSize
+	if pageSize <= 0 {
+		pageSize = 500
 	}
-	for _, rec := range processing {
-		if rec.TxnHash == "" {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		page, err := p.store.ListByStatusPaged(ctx, status, pageSize, cursorTime, cursorID)
+		if err != nil {
+			p.logger.Error("poller: list paged", "status", status, "error", err)
+			return
+		}
+		if len(page) == 0 {
+			return
+		}
+
+		// Advance the cursor to the last row of this page. ListByStatusPaged
+		// orders strictly by (updated_at ASC, id ASC) so this is the
+		// high-watermark for the next page.
+		last := page[len(page)-1]
+		cursorTime = last.UpdatedAt
+		cursorID = last.ID
+
+		p.processPage(ctx, page, status, requireHash)
+
+		// A short page means we've drained the backlog for this status.
+		// Stop here rather than issuing one more query that would return 0 rows.
+		if len(page) < pageSize {
+			return
+		}
+	}
+}
+
+// processPage runs confirmRecord across the page with bounded parallelism.
+// Parallelism is free under the rate limiter — confirmRecord blocks on
+// limiter.Wait before each RPC, so the throughput ceiling is unchanged.
+// What we gain is that a slow lookup for record N doesn't block lookups for
+// records N+1..N+p.sweepConcurrency in the same page.
+func (p *Poller) processPage(ctx context.Context, page []*store.TransactionRecord, expected store.TxnStatus, requireHash bool) {
+	concurrency := p.sweepConcurrency
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for _, rec := range page {
+		if requireHash && rec.TxnHash == "" {
 			continue
 		}
-		p.confirmRecord(ctx, rec, store.StatusProcessing)
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return
+		case sem <- struct{}{}:
+		}
+		wg.Add(1)
+		go func(r *store.TransactionRecord) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			p.confirmRecord(ctx, r, expected)
+		}(rec)
 	}
+	wg.Wait()
 }
 
 // confirmRecord looks the record up on chain and transitions it to its

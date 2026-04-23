@@ -419,6 +419,11 @@ func (m *mockQueue) ListByStatus(ctx context.Context, status store.TxnStatus) ([
 	}
 	return nil, nil
 }
+
+func (m *mockQueue) ListByStatusPaged(ctx context.Context, status store.TxnStatus, _ int, _ time.Time, _ string) ([]*store.TransactionRecord, error) {
+	return m.ListByStatus(ctx, status)
+}
+
 func (m *mockQueue) Close() error { return nil }
 
 func (m *mockQueue) ReconcileSequence(ctx context.Context, senderAddress string, chainSeq uint64) error {

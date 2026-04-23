@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -175,6 +176,41 @@ func (s *MemoryStore) ListByStatus(_ context.Context, status TxnStatus) ([]*Tran
 		}
 	}
 	return result, nil
+}
+
+// ListByStatusPaged is the paged variant used by the poller; it sorts by
+// (updated_at, id) and skips past the cursor tuple. See the Store interface
+// doc for why the poller needs paginated access.
+func (s *MemoryStore) ListByStatusPaged(_ context.Context, status TxnStatus, limit int, afterUpdatedAt time.Time, afterID string) ([]*TransactionRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var matched []*TransactionRecord
+	for _, rec := range s.records {
+		if rec.Status != status {
+			continue
+		}
+		// Strict > on the (updated_at, id) tuple so the next page picks up
+		// where the previous one left off without revisiting boundary rows.
+		if rec.UpdatedAt.Before(afterUpdatedAt) {
+			continue
+		}
+		if rec.UpdatedAt.Equal(afterUpdatedAt) && rec.ID <= afterID {
+			continue
+		}
+		cp := *rec
+		matched = append(matched, &cp)
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		if !matched[i].UpdatedAt.Equal(matched[j].UpdatedAt) {
+			return matched[i].UpdatedAt.Before(matched[j].UpdatedAt)
+		}
+		return matched[i].ID < matched[j].ID
+	})
+	if limit > 0 && len(matched) > limit {
+		matched = matched[:limit]
+	}
+	return matched, nil
 }
 
 // Close stops the background reaper goroutine.

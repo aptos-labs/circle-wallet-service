@@ -114,6 +114,16 @@ type PollerConfig struct {
 	RPCRequestsPerSecond int `yaml:"rpc_requests_per_second"`
 	// RPCBurst is the token-bucket burst size. Defaults to RPCRequestsPerSecond.
 	RPCBurst int `yaml:"rpc_burst"`
+	// PageSize caps how many rows a single ListByStatusPaged call pulls.
+	// The poller loops pages within a tick so the sweep can cover large
+	// backlogs without loading every unconfirmed row into memory. 500 keeps
+	// the resident-set bounded to a few hundred KB per page.
+	PageSize int `yaml:"page_size"`
+	// SweepConcurrency is the size of the worker pool draining each page.
+	// Parallelism under the rate limiter is free (the limiter is the real
+	// throughput ceiling), so this lets one slow lookup not block every
+	// other record in the same page. Defaults to RPCBurst (or 4 if unset).
+	SweepConcurrency int `yaml:"sweep_concurrency"`
 }
 
 type WebhookConfig struct {
@@ -190,6 +200,8 @@ func defaultConfig() *Config {
 			IntervalSeconds:      5,
 			RPCRequestsPerSecond: 10,
 			RPCBurst:             10,
+			PageSize:             500,
+			SweepConcurrency:     10,
 		},
 		Webhook: WebhookConfig{
 			GlobalURL:           "",
@@ -424,6 +436,23 @@ func (c *Config) PollerRPCBurst() int {
 		return c.Poller.RPCBurst
 	}
 	return c.Poller.RPCRequestsPerSecond
+}
+
+func (c *Config) PollerPageSize() int {
+	if c.Poller.PageSize > 0 {
+		return c.Poller.PageSize
+	}
+	return 500
+}
+
+func (c *Config) PollerSweepConcurrency() int {
+	if c.Poller.SweepConcurrency > 0 {
+		return c.Poller.SweepConcurrency
+	}
+	if burst := c.PollerRPCBurst(); burst > 0 {
+		return burst
+	}
+	return 4
 }
 
 func (c *Config) SubmitterPollIntervalMs() int {
