@@ -935,7 +935,7 @@ type fakeSubmitter struct {
 	err  error
 }
 
-func (f *fakeSubmitter) SubmitTransaction(_ *aptossdk.SignedTransaction) (*api.SubmitTransactionResponse, error) {
+func (f *fakeSubmitter) SubmitTransactionCtx(_ context.Context, _ *aptossdk.SignedTransaction) (*api.SubmitTransactionResponse, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -951,6 +951,7 @@ func TestSubmitSigned_Success(t *testing.T) {
 	}
 	mq := &mockQueue{}
 	s := &Submitter{
+		cfg:      &config.Config{},
 		queue:    mq,
 		txSubmit: &fakeSubmitter{hash: "0xabc"},
 		logger:   slog.New(slog.DiscardHandler),
@@ -981,6 +982,7 @@ func TestSubmitSigned_RowNoLongerProcessingBailsWithoutBroadcast(t *testing.T) {
 	}
 	submit := &fakeSubmitter{hash: "MUST_NOT_BE_BROADCAST"}
 	s := &Submitter{
+		cfg:      &config.Config{},
 		queue:    mq,
 		txSubmit: submit,
 		logger:   slog.New(slog.DiscardHandler),
@@ -1014,6 +1016,7 @@ func TestSubmitSigned_UpdateFails(t *testing.T) {
 	}
 	mq := &mockQueue{updateErr: errors.New("db")}
 	s := &Submitter{
+		cfg:      &config.Config{},
 		queue:    mq,
 		txSubmit: &fakeSubmitter{hash: "0xabc"},
 		logger:   slog.New(slog.DiscardHandler),

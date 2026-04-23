@@ -112,6 +112,83 @@ func (c *Client) SubmitTransaction(signed *aptossdk.SignedTransaction) (*api.Sub
 	return c.Inner.SubmitTransaction(signed)
 }
 
+// SubmitTransactionCtx is a context-aware wrapper around SubmitTransaction.
+//
+// The SDK's SubmitTransaction call has no ctx parameter; it is bounded only by
+// the SDK's HTTP client timeout. When the caller holds a per-call deadline
+// (see submitter's AptosSubmitTimeoutSeconds), we want to return as soon as
+// ctx fires rather than waiting out the SDK's timeout. The background
+// goroutine may continue running until the SDK's HTTP client gives up; that
+// is acceptable because the caller has moved on.
+func (c *Client) SubmitTransactionCtx(ctx context.Context, signed *aptossdk.SignedTransaction) (*api.SubmitTransactionResponse, error) {
+	type result struct {
+		resp *api.SubmitTransactionResponse
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		resp, err := c.Inner.SubmitTransaction(signed)
+		ch <- result{resp: resp, err: err}
+	}()
+	select {
+	case r := <-ch:
+		return r.resp, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// BuildFeePayerTransactionCtx wraps BuildFeePayerTransaction with context
+// cancellation. BuildTransactionMultiAgent performs a network lookup for the
+// account's current sequence; without a ctx wrap a slow node can stall the
+// signing pipeline past the stale-processing threshold and race with
+// RecoverStaleProcessing.
+func (c *Client) BuildFeePayerTransactionCtx(
+	ctx context.Context,
+	senderAddr aptossdk.AccountAddress,
+	feePayerAddr aptossdk.AccountAddress,
+	payload aptossdk.TransactionPayload,
+	maxGasAmount uint64,
+	sequenceNumber uint64,
+) (*aptossdk.RawTransactionWithData, error) {
+	type result struct {
+		raw *aptossdk.RawTransactionWithData
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		raw, err := c.BuildFeePayerTransaction(senderAddr, feePayerAddr, payload, maxGasAmount, sequenceNumber)
+		ch <- result{raw: raw, err: err}
+	}()
+	select {
+	case r := <-ch:
+		return r.raw, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// AccountCtx wraps Inner.Account with context cancellation. Used by the
+// submitter's reconcile paths where a hung node would otherwise stall the
+// worker across the full SDK HTTP timeout.
+func (c *Client) AccountCtx(ctx context.Context, addr aptossdk.AccountAddress) (aptossdk.AccountInfo, error) {
+	type result struct {
+		info aptossdk.AccountInfo
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		info, err := c.Inner.Account(addr)
+		ch <- result{info: info, err: err}
+	}()
+	select {
+	case r := <-ch:
+		return r.info, r.err
+	case <-ctx.Done():
+		return aptossdk.AccountInfo{}, ctx.Err()
+	}
+}
+
 // simulateHTTPClient is used for /transactions/simulate calls only. We own it
 // because the SDK's simulate helpers demand a TransactionSigner (i.e. a private
 // key) — this service delegates signing to Circle so we never hold the private
