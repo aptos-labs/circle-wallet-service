@@ -975,3 +975,281 @@ func TestStaleRecoveryDoesNotAffectRecentProcessing(t *testing.T) {
 		t.Fatalf("processing count %d", len(list))
 	}
 }
+
+// seedTerminal creates a terminal-status row with a specific updated_at, which
+// is the column the archive methods and paging cursor key off of. idempKey="" means no key.
+func seedTerminal(t *testing.T, s *Store, status store.TxnStatus, updated time.Time, idempKey string) *store.TransactionRecord {
+	t.Helper()
+	ctx := context.Background()
+	rec := testTxn("0xarchv", status)
+	rec.CreatedAt = updated
+	rec.UpdatedAt = updated
+	rec.IdempotencyKey = idempKey
+	if err := s.Create(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	return rec
+}
+
+// TestListByStatusPagedCursor verifies the (updated_at, id) cursor advances
+// strictly and returns pages in ascending order. Five rows with staggered
+// updated_at and pageSize=2 ⇒ pages of (2, 2, 1).
+func TestListByStatusPagedCursor(t *testing.T) {
+	s := testDB(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Hour)
+	var ids []string
+	for i := range 5 {
+		rec := seedTerminal(t, s, store.StatusConfirmed, base.Add(time.Duration(i)*time.Second), "")
+		ids = append(ids, rec.ID)
+	}
+
+	var cursorTime time.Time
+	var cursorID string
+	var seen []string
+	for {
+		page, err := s.ListByStatusPaged(ctx, store.StatusConfirmed, 2, cursorTime, cursorID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, r := range page {
+			seen = append(seen, r.ID)
+		}
+		last := page[len(page)-1]
+		cursorTime = last.UpdatedAt
+		cursorID = last.ID
+		if len(page) < 2 {
+			break
+		}
+	}
+	if len(seen) != 5 {
+		t.Fatalf("want 5 rows over paged scan, got %d: %v", len(seen), seen)
+	}
+	// Rows were seeded with ascending updated_at ⇒ paged scan must preserve that order.
+	for i, id := range ids {
+		if seen[i] != id {
+			t.Errorf("page order mismatch at %d: got %s want %s", i, seen[i], id)
+		}
+	}
+}
+
+// TestListByStatusPagedStatusFilter verifies other statuses are not leaked
+// across the page boundary when the cursor walks the index.
+func TestListByStatusPagedStatusFilter(t *testing.T) {
+	s := testDB(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Hour)
+
+	// Interleave confirmed/failed/queued at successive updated_at so the index
+	// would return them mixed if the WHERE status filter regressed.
+	for i, st := range []store.TxnStatus{
+		store.StatusConfirmed, store.StatusFailed, store.StatusConfirmed,
+		store.StatusQueued, store.StatusConfirmed,
+	} {
+		seedTerminal(t, s, st, base.Add(time.Duration(i)*time.Second), "")
+	}
+	page, err := s.ListByStatusPaged(ctx, store.StatusConfirmed, 10, time.Time{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 3 {
+		t.Fatalf("confirmed rows returned=%d want 3", len(page))
+	}
+	for _, r := range page {
+		if r.Status != store.StatusConfirmed {
+			t.Errorf("leaked status %s", r.Status)
+		}
+	}
+}
+
+// TestPurgeTerminalOlderThan_FiltersAndRespectsLimit covers three things:
+//   - Status filter: only confirmed/failed/expired rows get deleted; queued
+//     and submitted must survive even if they're "old".
+//   - Cutoff filter: rows newer than cutoff must survive.
+//   - Limit: one call deletes at most `limit` rows; remainder is cleaned up on
+//     a subsequent call, as the Archiver loop would.
+func TestPurgeTerminalOlderThan_FiltersAndRespectsLimit(t *testing.T) {
+	s := testDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	old := now.Add(-48 * time.Hour)
+	fresh := now.Add(-time.Minute)
+
+	// Five aged terminal rows (eligible for purge), plus immune rows:
+	for range 5 {
+		seedTerminal(t, s, store.StatusConfirmed, old, "")
+	}
+	keepBecauseFresh := seedTerminal(t, s, store.StatusConfirmed, fresh, "")
+	keepBecauseNonTerminal := seedTerminal(t, s, store.StatusQueued, old, "")
+	keepBecauseSubmitted := seedTerminal(t, s, store.StatusSubmitted, old, "")
+
+	// First purge with limit=2: deletes exactly 2.
+	n, err := s.PurgeTerminalOlderThan(ctx, now.Add(-time.Hour), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("first purge deleted %d, want 2", n)
+	}
+	// Second purge: up to 10 more, but only 3 aged terminal rows remain.
+	n, err = s.PurgeTerminalOlderThan(ctx, now.Add(-time.Hour), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Fatalf("second purge deleted %d, want 3", n)
+	}
+	// Third purge: nothing left to delete.
+	n, err = s.PurgeTerminalOlderThan(ctx, now.Add(-time.Hour), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("third purge deleted %d, want 0", n)
+	}
+	// Immune rows must still exist.
+	for _, id := range []string{keepBecauseFresh.ID, keepBecauseNonTerminal.ID, keepBecauseSubmitted.ID} {
+		got, err := s.Get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got == nil {
+			t.Errorf("row %s should have been spared by purge", id)
+		}
+	}
+}
+
+// TestPurgeTerminalOlderThan_CascadesWebhookDeliveries verifies the
+// ON DELETE CASCADE FK — deleting a transaction removes its outbox rows too.
+func TestPurgeTerminalOlderThan_CascadesWebhookDeliveries(t *testing.T) {
+	s := testDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	old := now.Add(-48 * time.Hour)
+
+	txn := seedTerminal(t, s, store.StatusConfirmed, old, "")
+	d := &webhook.DeliveryRecord{
+		ID: uuid.New().String(), TransactionID: txn.ID, URL: "https://x",
+		Payload: "{}", Status: "pending", Attempts: 0,
+		NextRetryAt: old, CreatedAt: old,
+	}
+	if err := s.CreateDelivery(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	// Confirm delivery exists before purge.
+	pre, err := s.ListByTransactionID(ctx, txn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pre) != 1 {
+		t.Fatalf("pre-purge deliveries=%d want 1", len(pre))
+	}
+
+	if _, err := s.PurgeTerminalOlderThan(ctx, now.Add(-time.Hour), 10); err != nil {
+		t.Fatal(err)
+	}
+	// Transaction is gone.
+	if got, _ := s.Get(ctx, txn.ID); got != nil {
+		t.Errorf("txn should have been purged; still present")
+	}
+	// Webhook rows cascaded.
+	post, err := s.ListByTransactionID(ctx, txn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(post) != 0 {
+		t.Errorf("webhook rows should have cascaded, got %d", len(post))
+	}
+}
+
+// TestClearIdempotencyOlderThan_NullsAndReleasesUnique verifies the two
+// observable effects: (1) idempotency_key becomes NULL on eligible rows so
+// GetByIdempotencyKey no longer finds them, and (2) the UNIQUE slot is
+// freed — a new row can Create with the same key without conflict.
+// Non-eligible rows (fresh, non-terminal, already-null) are untouched.
+func TestClearIdempotencyOlderThan_NullsAndReleasesUnique(t *testing.T) {
+	s := testDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	old := now.Add(-48 * time.Hour)
+	fresh := now.Add(-time.Minute)
+
+	agedKey := "aged-" + uuid.New().String()
+	freshKey := "fresh-" + uuid.New().String()
+	nonTermKey := "queued-" + uuid.New().String()
+
+	aged := seedTerminal(t, s, store.StatusConfirmed, old, agedKey)
+	freshRec := seedTerminal(t, s, store.StatusConfirmed, fresh, freshKey)
+	nonTerm := seedTerminal(t, s, store.StatusQueued, old, nonTermKey)
+
+	n, err := s.ClearIdempotencyOlderThan(ctx, now.Add(-time.Hour), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("cleared %d rows, want exactly 1 (the aged terminal row)", n)
+	}
+
+	// Aged row's key must be NULL-equivalent ⇒ GetByIdempotencyKey returns nil.
+	if got, _ := s.GetByIdempotencyKey(ctx, agedKey); got != nil {
+		t.Errorf("aged key should be cleared; lookup returned %s", got.ID)
+	}
+	// But the audit row itself still exists.
+	if got, _ := s.Get(ctx, aged.ID); got == nil {
+		t.Errorf("aged row should still exist (only the key is NULLed)")
+	}
+	// Fresh and non-terminal keys untouched.
+	if got, _ := s.GetByIdempotencyKey(ctx, freshKey); got == nil || got.ID != freshRec.ID {
+		t.Errorf("fresh key should remain; got %v", got)
+	}
+	if got, _ := s.GetByIdempotencyKey(ctx, nonTermKey); got == nil || got.ID != nonTerm.ID {
+		t.Errorf("non-terminal key should remain; got %v", got)
+	}
+
+	// UNIQUE(idempotency_key) slot is freed: creating a new row with agedKey must succeed.
+	reuse := testTxn("0xreuse", store.StatusQueued)
+	reuse.IdempotencyKey = agedKey
+	if err := s.Create(ctx, reuse); err != nil {
+		t.Fatalf("expected reuse of cleared key to succeed, got %v", err)
+	}
+
+	// Second run deletes nothing (the aged row's key is already NULL, which
+	// the WHERE idempotency_key IS NOT NULL clause filters out).
+	n, err = s.ClearIdempotencyOlderThan(ctx, now.Add(-time.Hour), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("second clear affected %d rows, want 0", n)
+	}
+}
+
+// TestClearIdempotencyOlderThan_RespectsLimit mirrors the purge-limit test:
+// per-call cap, remainder cleaned on subsequent call.
+func TestClearIdempotencyOlderThan_RespectsLimit(t *testing.T) {
+	s := testDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	old := now.Add(-48 * time.Hour)
+
+	for range 4 {
+		seedTerminal(t, s, store.StatusConfirmed, old, uuid.New().String())
+	}
+	n, err := s.ClearIdempotencyOlderThan(ctx, now.Add(-time.Hour), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("first clear affected %d, want 2", n)
+	}
+	n, err = s.ClearIdempotencyOlderThan(ctx, now.Add(-time.Hour), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("second clear affected %d, want 2", n)
+	}
+}

@@ -530,6 +530,288 @@ func TestPollerRateLimiterThrottles(t *testing.T) {
 	}
 }
 
+// pagingStubStore honors pageSize + cursor so we can verify that the poller
+// actually paginates (the simpler stubStore flattens paging into one list).
+// It records the (limit, cursorTime, cursorID) of every ListByStatusPaged call
+// so tests can assert the cursor advances page-by-page.
+type pagingStubStore struct {
+	mu      sync.Mutex
+	records []*store.TransactionRecord // assumed pre-sorted by (UpdatedAt, ID) ASC
+	calls   []pageCall
+}
+
+type pageCall struct {
+	limit      int
+	cursorTime time.Time
+	cursorID   string
+	returned   int
+}
+
+func (s *pagingStubStore) Create(context.Context, *store.TransactionRecord) error {
+	return errors.New("stub")
+}
+func (s *pagingStubStore) Update(context.Context, *store.TransactionRecord) error {
+	return errors.New("stub")
+}
+func (s *pagingStubStore) Get(context.Context, string) (*store.TransactionRecord, error) {
+	return nil, nil
+}
+func (s *pagingStubStore) GetByIdempotencyKey(context.Context, string) (*store.TransactionRecord, error) {
+	return nil, nil
+}
+func (s *pagingStubStore) Close() error                                                 { return nil }
+func (s *pagingStubStore) PurgeTerminalOlderThan(context.Context, time.Time, int) (int64, error) {
+	return 0, nil
+}
+func (s *pagingStubStore) ClearIdempotencyOlderThan(context.Context, time.Time, int) (int64, error) {
+	return 0, nil
+}
+func (s *pagingStubStore) UpdateIfStatus(context.Context, *store.TransactionRecord, store.TxnStatus) (bool, error) {
+	return false, nil
+}
+func (s *pagingStubStore) ListByStatus(_ context.Context, _ store.TxnStatus) ([]*store.TransactionRecord, error) {
+	return nil, errors.New("stub: use ListByStatusPaged")
+}
+
+func (s *pagingStubStore) ListByStatusPaged(_ context.Context, status store.TxnStatus, limit int, cursorTime time.Time, cursorID string) ([]*store.TransactionRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	call := pageCall{limit: limit, cursorTime: cursorTime, cursorID: cursorID}
+	out := make([]*store.TransactionRecord, 0, limit)
+	for _, r := range s.records {
+		if r.Status != status {
+			continue
+		}
+		// Strict (updated_at, id) > (cursor) on the zero cursor means return
+		// everything, which matches the real MySQL implementation.
+		if !cursorTime.IsZero() {
+			if r.UpdatedAt.Before(cursorTime) {
+				continue
+			}
+			if r.UpdatedAt.Equal(cursorTime) && r.ID <= cursorID {
+				continue
+			}
+		}
+		out = append(out, r)
+		if len(out) >= limit {
+			break
+		}
+	}
+	call.returned = len(out)
+	s.calls = append(s.calls, call)
+	return out, nil
+}
+
+// TestPollerPaginatesAcrossPages seeds more rows than one page and verifies
+// that the poller walks through all of them by advancing the cursor.
+// Also asserts the sweep stops after a short page rather than issuing
+// an extra zero-row query.
+func TestPollerPaginatesAcrossPages(t *testing.T) {
+	now := time.Now().UTC()
+	exp := now.Add(time.Hour)
+	// 7 rows total, page size 3 ⇒ expect pages of sizes 3, 3, 1 (short ⇒ stop).
+	var records []*store.TransactionRecord
+	for i := range 7 {
+		records = append(records, &store.TransactionRecord{
+			ID: "pg-" + string(rune('a'+i)), Status: store.StatusSubmitted,
+			SenderAddress: "0x1", FunctionID: "0x1::m::f", WalletID: "w",
+			TxnHash: "0x" + string(rune('a'+i)),
+			// Stagger UpdatedAt so the (updated_at, id) cursor advances deterministically.
+			CreatedAt: now, UpdatedAt: now.Add(time.Duration(i) * time.Millisecond), ExpiresAt: exp,
+		})
+	}
+	st := &pagingStubStore{records: records}
+
+	fetch := &mockTxnFetcher{fn: func(string) (*api.Transaction, error) {
+		// Pending return so no state mutation; we're measuring pagination, not confirms.
+		return &api.Transaction{Inner: &api.PendingTransaction{}}, nil
+	}}
+	p := &Poller{
+		client:           fetch,
+		store:            st,
+		notifier:         &mockNotifier{},
+		interval:         time.Minute,
+		pageSize:         3,
+		sweepConcurrency: 1,
+		logger:           slog.New(slog.DiscardHandler),
+	}
+	p.poll(context.Background())
+
+	// poll() calls sweepStatus twice (submitted + processing). The processing
+	// sweep sees zero rows and issues exactly one ListByStatusPaged call that
+	// returns empty. So total pageCalls = submitted pages + 1 empty processing call.
+	st.mu.Lock()
+	calls := append([]pageCall(nil), st.calls...)
+	st.mu.Unlock()
+	if len(calls) < 3 {
+		t.Fatalf("want >=3 ListByStatusPaged calls for pagination, got %d: %+v", len(calls), calls)
+	}
+	// First call: zero cursor.
+	if !calls[0].cursorTime.IsZero() || calls[0].cursorID != "" {
+		t.Errorf("first call should use zero cursor, got %+v", calls[0])
+	}
+	// Returned sizes for the submitted sweep should be 3, 3, 1.
+	wantSizes := []int{3, 3, 1}
+	for i, want := range wantSizes {
+		if calls[i].returned != want {
+			t.Errorf("call %d returned %d rows, want %d", i, calls[i].returned, want)
+		}
+	}
+	// Cursor should advance: call[1].cursorTime == call[0]'s last row UpdatedAt.
+	if !calls[1].cursorTime.Equal(records[2].UpdatedAt) || calls[1].cursorID != records[2].ID {
+		t.Errorf("cursor did not advance: call[1] cursor=(%v,%s) want (%v,%s)",
+			calls[1].cursorTime, calls[1].cursorID, records[2].UpdatedAt, records[2].ID)
+	}
+	if !calls[2].cursorTime.Equal(records[5].UpdatedAt) || calls[2].cursorID != records[5].ID {
+		t.Errorf("cursor did not advance: call[2] cursor=(%v,%s) want (%v,%s)",
+			calls[2].cursorTime, calls[2].cursorID, records[5].UpdatedAt, records[5].ID)
+	}
+	// Fetcher should have been called once per submitted row.
+	fetch.mu.Lock()
+	gotCalls := fetch.calls
+	fetch.mu.Unlock()
+	if gotCalls != 7 {
+		t.Errorf("fetcher calls=%d want 7", gotCalls)
+	}
+}
+
+// TestPollerProcessesPageInParallel proves that within a single page the
+// worker pool dispatches multiple confirmRecord goroutines concurrently.
+// The fetcher blocks until it has seen `concurrency` simultaneous callers;
+// if the poller were serial, only one would ever be in flight at once and
+// the test would time out.
+func TestPollerProcessesPageInParallel(t *testing.T) {
+	const concurrency = 4
+	now := time.Now().UTC()
+	exp := now.Add(time.Hour)
+	var records []*store.TransactionRecord
+	for i := range concurrency {
+		records = append(records, &store.TransactionRecord{
+			ID: "par-" + string(rune('a'+i)), Status: store.StatusSubmitted,
+			SenderAddress: "0x1", FunctionID: "0x1::m::f", WalletID: "w",
+			TxnHash:   "0xp" + string(rune('a'+i)),
+			CreatedAt: now, UpdatedAt: now.Add(time.Duration(i) * time.Millisecond), ExpiresAt: exp,
+		})
+	}
+	st := &pagingStubStore{records: records}
+
+	inFlight := make(chan struct{}, concurrency)
+	release := make(chan struct{})
+	var peak int64
+	var peakMu sync.Mutex
+	fetch := &mockTxnFetcher{fn: func(string) (*api.Transaction, error) {
+		inFlight <- struct{}{}
+		peakMu.Lock()
+		if int64(len(inFlight)) > peak {
+			peak = int64(len(inFlight))
+		}
+		peakMu.Unlock()
+		<-release
+		<-inFlight
+		return &api.Transaction{Inner: &api.PendingTransaction{}}, nil
+	}}
+
+	p := &Poller{
+		client:           fetch,
+		store:            st,
+		notifier:         &mockNotifier{},
+		interval:         time.Minute,
+		pageSize:         concurrency * 2,
+		sweepConcurrency: concurrency,
+		logger:           slog.New(slog.DiscardHandler),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		p.poll(context.Background())
+		close(done)
+	}()
+
+	// Wait until all `concurrency` fetchers have entered the fn simultaneously.
+	deadline := time.After(2 * time.Second)
+	for {
+		peakMu.Lock()
+		p := peak
+		peakMu.Unlock()
+		if p >= int64(concurrency) {
+			break
+		}
+		select {
+		case <-deadline:
+			peakMu.Lock()
+			got := peak
+			peakMu.Unlock()
+			t.Fatalf("only %d concurrent fetchers observed (want %d); parallelism is broken", got, concurrency)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	close(release)
+	<-done
+}
+
+// TestPollerProcessingRecoveryRequireHash verifies the processing-status
+// recovery path skips records without a txn hash (never safe to confirm
+// without re-signing) and processes ones with a pre-persisted hash.
+func TestPollerProcessingRecoveryRequireHash(t *testing.T) {
+	st := store.NewMemoryStore(time.Hour)
+	defer func() { _ = st.Close() }()
+	now := time.Now().UTC()
+	exp := now.Add(time.Hour)
+
+	// Two processing rows: one with pre-persisted hash (safe to confirm),
+	// one without (must be skipped by requireHash filter).
+	withHash := &store.TransactionRecord{
+		ID: "proc-with", Status: store.StatusProcessing,
+		SenderAddress: "0x1", FunctionID: "0x1::m::f", WalletID: "w",
+		TxnHash: "0xproc", CreatedAt: now, UpdatedAt: now, ExpiresAt: exp,
+	}
+	withoutHash := &store.TransactionRecord{
+		ID: "proc-without", Status: store.StatusProcessing,
+		SenderAddress: "0x1", FunctionID: "0x1::m::f", WalletID: "w",
+		TxnHash: "", CreatedAt: now, UpdatedAt: now, ExpiresAt: exp,
+	}
+	if err := st.Create(context.Background(), withHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Create(context.Background(), withoutHash); err != nil {
+		t.Fatal(err)
+	}
+
+	fetch := &mockTxnFetcher{fn: func(hash string) (*api.Transaction, error) {
+		if hash != "0xproc" {
+			t.Errorf("unexpected hash fetched: %q", hash)
+		}
+		return userTxn(true, ""), nil
+	}}
+	n := &mockNotifier{}
+	p := &Poller{
+		client: fetch, store: st, notifier: n, interval: time.Minute,
+		pageSize: 100, sweepConcurrency: 1, logger: slog.New(slog.DiscardHandler),
+	}
+	p.poll(context.Background())
+
+	// Exactly one fetch — only the hashed processing row is eligible.
+	fetch.mu.Lock()
+	calls := fetch.calls
+	fetch.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("fetcher calls=%d want 1 (only the hashed processing row)", calls)
+	}
+	if n.calls() != 1 {
+		t.Errorf("notifier calls=%d want 1", n.calls())
+	}
+
+	// The hashed row advanced to confirmed; the empty-hash row stayed in processing.
+	got, _ := st.Get(context.Background(), "proc-with")
+	if got == nil || got.Status != store.StatusConfirmed {
+		t.Errorf("proc-with: %#v", got)
+	}
+	got, _ = st.Get(context.Background(), "proc-without")
+	if got == nil || got.Status != store.StatusProcessing {
+		t.Errorf("proc-without should remain processing: %#v", got)
+	}
+}
+
 // TestPollerNoLimiterByDefault verifies poll() with rpcRPS=0 does not throttle
 // and makes all its calls immediately.
 func TestPollerNoLimiterByDefault(t *testing.T) {
