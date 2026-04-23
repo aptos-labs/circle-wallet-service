@@ -216,7 +216,7 @@ func TestPurgeTerminalOlderThan_FiltersAndCleansIndex(t *testing.T) {
 		{ID: "old-confirmed", Status: StatusConfirmed, IdempotencyKey: "k-oc"},
 		{ID: "old-failed", Status: StatusFailed, IdempotencyKey: "k-of"},
 		{ID: "old-expired", Status: StatusExpired},
-		{ID: "old-queued", Status: StatusQueued, IdempotencyKey: "k-oq"},      // non-terminal: keep
+		{ID: "old-queued", Status: StatusQueued, IdempotencyKey: "k-oq"},          // non-terminal: keep
 		{ID: "recent-confirmed", Status: StatusConfirmed, IdempotencyKey: "k-rc"}, // too new: keep
 	}
 	for _, r := range recs {

@@ -550,25 +550,31 @@ type pageCall struct {
 func (s *pagingStubStore) Create(context.Context, *store.TransactionRecord) error {
 	return errors.New("stub")
 }
+
 func (s *pagingStubStore) Update(context.Context, *store.TransactionRecord) error {
 	return errors.New("stub")
 }
+
 func (s *pagingStubStore) Get(context.Context, string) (*store.TransactionRecord, error) {
 	return nil, nil
 }
+
 func (s *pagingStubStore) GetByIdempotencyKey(context.Context, string) (*store.TransactionRecord, error) {
 	return nil, nil
 }
-func (s *pagingStubStore) Close() error                                                 { return nil }
+func (s *pagingStubStore) Close() error { return nil }
 func (s *pagingStubStore) PurgeTerminalOlderThan(context.Context, time.Time, int) (int64, error) {
 	return 0, nil
 }
+
 func (s *pagingStubStore) ClearIdempotencyOlderThan(context.Context, time.Time, int) (int64, error) {
 	return 0, nil
 }
+
 func (s *pagingStubStore) UpdateIfStatus(context.Context, *store.TransactionRecord, store.TxnStatus) (bool, error) {
 	return false, nil
 }
+
 func (s *pagingStubStore) ListByStatus(_ context.Context, _ store.TxnStatus) ([]*store.TransactionRecord, error) {
 	return nil, errors.New("stub: use ListByStatusPaged")
 }
