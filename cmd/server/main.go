@@ -135,6 +135,8 @@ func run(logger *slog.Logger) error {
 			time.Duration(cfg.PollIntervalSeconds())*time.Second,
 			cfg.PollerRPCRequestsPerSecond(),
 			cfg.PollerRPCBurst(),
+			cfg.PollerPageSize(),
+			cfg.PollerSweepConcurrency(),
 			logger,
 		)
 		go txnPoller.Run(ctx)

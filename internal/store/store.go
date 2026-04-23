@@ -75,6 +75,17 @@ type Store interface {
 	Get(ctx context.Context, id string) (*TransactionRecord, error)
 	GetByIdempotencyKey(ctx context.Context, key string) (*TransactionRecord, error)
 	ListByStatus(ctx context.Context, status TxnStatus) ([]*TransactionRecord, error)
+	// ListByStatusPaged returns up to `limit` rows matching status, ordered by
+	// (updated_at ASC, id ASC). The cursor (afterUpdatedAt, afterID) yields
+	// rows strictly greater than that tuple; pass the zero time and empty id
+	// to start from the beginning.
+	//
+	// Pagination is required for the poller's sweep path: an unbounded
+	// ListByStatus against a large backlog would load every submitted row
+	// into memory per tick, and iterate serially through the rate limiter
+	// long past the tick interval. Callers process one page, then pass the
+	// last row's (updated_at, id) as the next cursor.
+	ListByStatusPaged(ctx context.Context, status TxnStatus, limit int, afterUpdatedAt time.Time, afterID string) ([]*TransactionRecord, error)
 	Close() error
 }
 

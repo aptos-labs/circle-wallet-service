@@ -76,6 +76,12 @@ func (s *stubStore) ListByStatus(_ context.Context, _ store.TxnStatus) ([]*store
 	return s.list, nil
 }
 
+// ListByStatusPaged delegates to the full list here; test fixtures are small
+// enough that paging offers no signal worth mimicking.
+func (s *stubStore) ListByStatusPaged(ctx context.Context, status store.TxnStatus, _ int, _ time.Time, _ string) ([]*store.TransactionRecord, error) {
+	return s.ListByStatus(ctx, status)
+}
+
 func (s *stubStore) UpdateIfStatus(ctx context.Context, rec *store.TransactionRecord, expected store.TxnStatus) (bool, error) {
 	s.updateIfCalls++
 	if s.updateIfFn != nil {
@@ -336,7 +342,7 @@ func TestPollLoopExitsOnCancel(t *testing.T) {
 	defer func() { _ = st.Close() }()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	p := New(&mockTxnFetcher{}, st, &mockNotifier{}, time.Millisecond, 0, 0, slog.New(slog.DiscardHandler))
+	p := New(&mockTxnFetcher{}, st, &mockNotifier{}, time.Millisecond, 0, 0, 0, 0, slog.New(slog.DiscardHandler))
 	done := make(chan struct{})
 	go func() {
 		p.Run(ctx)
@@ -497,7 +503,7 @@ func TestPollerRateLimiterThrottles(t *testing.T) {
 	fetch := &mockTxnFetcher{fn: func(string) (*api.Transaction, error) {
 		return &api.Transaction{Inner: &api.PendingTransaction{}}, nil
 	}}
-	p := New(fetch, st, &mockNotifier{}, time.Minute, 2, 2, slog.New(slog.DiscardHandler))
+	p := New(fetch, st, &mockNotifier{}, time.Minute, 2, 2, 0, 0, slog.New(slog.DiscardHandler))
 
 	start := time.Now()
 	p.poll(context.Background())
@@ -537,7 +543,7 @@ func TestPollerNoLimiterByDefault(t *testing.T) {
 	fetch := &mockTxnFetcher{fn: func(string) (*api.Transaction, error) {
 		return &api.Transaction{Inner: &api.PendingTransaction{}}, nil
 	}}
-	p := New(fetch, st, &mockNotifier{}, time.Minute, 0, 0, slog.New(slog.DiscardHandler))
+	p := New(fetch, st, &mockNotifier{}, time.Minute, 0, 0, 0, 0, slog.New(slog.DiscardHandler))
 
 	start := time.Now()
 	p.poll(context.Background())
