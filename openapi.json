@@ -28,7 +28,7 @@
       "post": {
         "operationId": "executeContract",
         "summary": "Execute an entry function",
-        "description": "Enqueues a transaction calling the specified Move entry function. Arguments are untyped \u2014 the server resolves types from the on-chain module ABI and handles BCS serialization. Returns 202 with a `transaction_id` for polling. Signing and submission happen asynchronously in a per-sender worker.\n\n**Example: Self-paid transfer**\n```json\n{\n  \"wallet_id\": \"c1ab2c3d-...\",\n  \"address\": \"0xSENDER\",\n  \"function_id\": \"0x1::aptos_account::transfer\",\n  \"type_arguments\": [],\n  \"arguments\": [\"0xRECIPIENT\", \"100\"],\n  \"max_gas_amount\": 200000\n}\n```\n\n**Example: Fee-payer (gas sponsorship)**\n```json\n{\n  \"wallet_id\": \"sender-wallet-uuid\",\n  \"address\": \"0xSENDER\",\n  \"function_id\": \"0x1::coin::transfer\",\n  \"type_arguments\": [\"0x1::aptos_coin::AptosCoin\"],\n  \"arguments\": [\"0xRECIPIENT\", \"100\"],\n  \"fee_payer\": {\n    \"wallet_id\": \"gas-station-wallet-uuid\",\n    \"address\": \"0xGAS_STATION\"\n  }\n}\n```",
+        "description": "Enqueues a transaction calling the specified Move entry function. Arguments are untyped \u2014 the server resolves types from the on-chain module ABI and handles BCS serialization. Returns `202 Accepted` with a `transaction_id` for polling; signing and submission happen asynchronously in a per-sender worker.\n\n**Example: Self-paid transfer**\n```json\n{\n  \"wallet_id\": \"c1ab2c3d-e4f5-6789-abcd-ef0123456789\",\n  \"address\": \"0xSENDER\",\n  \"function_id\": \"0x1::aptos_account::transfer\",\n  \"type_arguments\": [],\n  \"arguments\": [\"0xRECIPIENT\", \"100\"],\n  \"max_gas_amount\": 200000\n}\n```\n\n**Example: Fee-payer (gas sponsorship)**\n```json\n{\n  \"wallet_id\": \"sender-wallet-uuid\",\n  \"address\": \"0xSENDER\",\n  \"function_id\": \"0x1::coin::transfer\",\n  \"type_arguments\": [\"0x1::aptos_coin::AptosCoin\"],\n  \"arguments\": [\"0xRECIPIENT\", \"100\"],\n  \"fee_payer\": {\n    \"wallet_id\": \"gas-station-wallet-uuid\",\n    \"address\": \"0xGAS_STATION\"\n  }\n}\n```\n\n**Example: With idempotency and webhook**\n```json\n{\n  \"wallet_id\": \"sender-wallet-uuid\",\n  \"address\": \"0xSENDER\",\n  \"function_id\": \"0x1::aptos_account::transfer\",\n  \"arguments\": [\"0xRECIPIENT\", \"100\"],\n  \"idempotency_key\": \"invoice-42\",\n  \"webhook_url\": \"https://your.host/callbacks/txn\"\n}\n```\nPoll `/v1/transactions/{transaction_id}` until `status` is `confirmed`, `failed`, or `expired`; the server also POSTs to `webhook_url` (if supplied) when a terminal status is reached.",
         "tags": [
           "Execute"
         ],
@@ -177,6 +177,16 @@
               }
             }
           },
+          "429": {
+            "description": "Rate limit exceeded (only when rate limiting is enabled). Honour the `Retry-After` response header.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "502": {
             "description": "Aptos node unreachable or view call returned an error (e.g. on-chain abort).",
             "content": {
@@ -306,6 +316,16 @@
               }
             }
           },
+          "429": {
+            "description": "Rate limit exceeded (only when rate limiting is enabled). Honour the `Retry-After` response header.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error (database failure)",
             "content": {
@@ -365,6 +385,16 @@
           },
           "401": {
             "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (only when rate limiting is enabled). Honour the `Retry-After` response header.",
             "content": {
               "application/json": {
                 "schema": {
