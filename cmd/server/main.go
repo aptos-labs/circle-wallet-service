@@ -99,6 +99,11 @@ func run(logger *slog.Logger) error {
 		logger.Warn("APTOS_NODE_URL not configured; query endpoint will not work")
 	}
 
+	if cfg.WebhookURL() != "" {
+		if err := handler2.ValidateWebhookURL(cfg.WebhookURL()); err != nil {
+			return fmt.Errorf("WEBHOOK_URL: %w", err)
+		}
+	}
 	notifier := webhook.NewWebhookNotifier(cfg.WebhookURL(), memStore, logger)
 
 	webhookWorker := webhook.NewWorker(
@@ -213,28 +218,28 @@ func run(logger *slog.Logger) error {
 
 	// API-key auth is disabled in testing mode so the test suite doesn't need to
 	// thread credentials through every request. In all other modes, every
-	// endpoint except /v1/health requires a bearer token (or X-API-Key header)
-	// matching cfg.APIKey(). Compared with subtle.ConstantTimeCompare to avoid
-	// timing side channels. /v1/health bypasses auth so orchestrators can probe
-	// liveness without a secret.
+	// endpoint except shallow /v1/health requires a bearer token (or X-API-Key
+	// header) matching cfg.APIKey(). Deep health touches MySQL, so it stays
+	// authenticated and rate-limited.
 	h := inner
 	if !cfg.TestingMode() {
 		apiKeyBytes := []byte(cfg.APIKey())
 		authedInner := inner
 		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/v1/health" {
-				mux.ServeHTTP(w, r)
+				if r.URL.Query().Get("deep") != "1" {
+					mux.ServeHTTP(w, r)
+					return
+				}
+				if !authorized(r, apiKeyBytes) {
+					unauthorized(w)
+					return
+				}
+				authedInner.ServeHTTP(w, r)
 				return
 			}
-			auth := r.Header.Get("Authorization")
-			if auth == "" {
-				auth = r.Header.Get("X-API-Key")
-			}
-			key := extractBearerToken(auth)
-			if subtle.ConstantTimeCompare([]byte(key), apiKeyBytes) != 1 {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			if !authorized(r, apiKeyBytes) {
+				unauthorized(w)
 				return
 			}
 			authedInner.ServeHTTP(w, r)
@@ -283,4 +288,19 @@ func extractBearerToken(header string) string {
 		return header[len(prefix):]
 	}
 	return header
+}
+
+func authorized(r *http.Request, apiKeyBytes []byte) bool {
+	auth := r.Header.Get("Authorization")
+	if auth == "" {
+		auth = r.Header.Get("X-API-Key")
+	}
+	key := extractBearerToken(auth)
+	return subtle.ConstantTimeCompare([]byte(key), apiKeyBytes) == 1
+}
+
+func unauthorized(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 }

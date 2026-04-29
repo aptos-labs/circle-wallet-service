@@ -82,6 +82,11 @@ type SubmitterConfig struct {
 	StaleProcessingSeconds  int `yaml:"stale_processing_seconds"`
 	RecoveryTickSeconds     int `yaml:"recovery_tick_seconds"`
 	SigningPipelineDepth    int `yaml:"signing_pipeline_depth"`
+	// MaxActiveSenderWorkers caps the number of per-sender submitter goroutines
+	// this process will run concurrently. Sender addresses come from request
+	// payloads, so without this cap an authenticated caller can enqueue many
+	// one-off senders and force unbounded worker fan-out.
+	MaxActiveSenderWorkers int `yaml:"max_active_sender_workers"`
 	// SimulateBeforeSubmit runs /transactions/simulate between build and sign.
 	// On VM-level rejection (Success=false), the row is marked failed with
 	// vm_status instead of burning a Circle signing round-trip and an on-chain
@@ -224,6 +229,7 @@ func defaultConfig() *Config {
 			StaleProcessingSeconds:           120,
 			RecoveryTickSeconds:              30,
 			SigningPipelineDepth:             4,
+			MaxActiveSenderWorkers:           128,
 			SimulateBeforeSubmit:             true,
 			CalibrateGasFromSimulation:       true,
 			CircleSignTimeoutSeconds:         15,
@@ -556,6 +562,13 @@ func (c *Config) SubmitterRecoveryTickSeconds() int {
 
 func (c *Config) SubmitterSigningPipelineDepth() int {
 	return c.Submitter.SigningPipelineDepth
+}
+
+func (c *Config) SubmitterMaxActiveSenderWorkers() int {
+	if c.Submitter.MaxActiveSenderWorkers > 0 {
+		return c.Submitter.MaxActiveSenderWorkers
+	}
+	return 128
 }
 
 func (c *Config) SimulateBeforeSubmit() bool {

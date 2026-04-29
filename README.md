@@ -12,7 +12,7 @@ Wallet IDs and addresses are provided per-request — no wallet configuration on
 | `POST` | `/v1/query` | Yes | Call a view function (sync, returns 200) |
 | `GET` | `/v1/transactions/{id}` | Yes | Poll transaction status and metadata |
 | `GET` | `/v1/transactions/{id}/webhooks` | Yes | List webhook delivery attempts for a transaction |
-| `GET` | `/v1/health` | No | Health check (`?deep=1` verifies MySQL connectivity) |
+| `GET` | `/v1/health` | No for shallow; yes for `?deep=1` | Health check (`?deep=1` verifies MySQL connectivity) |
 
 ## Quick Start
 
@@ -110,7 +110,7 @@ Configuration is loaded from `config.yaml` (or the path in `CONFIG_PATH`), with 
 |----------|---------|-------------|
 | `MYSQL_DSN` | *(required)* | [go-sql-driver/mysql](https://github.com/go-sql-driver/mysql) DSN (e.g. `user:pass@tcp(127.0.0.1:3306)/dbname?parseTime=true`) |
 
-The server runs embedded migrations on startup. `GET /v1/health?deep=1` checks database connectivity.
+The server runs embedded migrations on startup. `GET /v1/health?deep=1` checks database connectivity and requires API authentication outside testing mode.
 
 ### Aptos
 
@@ -127,7 +127,7 @@ The server runs embedded migrations on startup. `GET /v1/health?deep=1` checks d
 | `CIRCLE_API_KEY` | *(required)* | Circle API key |
 | `CIRCLE_ENTITY_SECRET` | *(required)* | 32-byte hex entity secret |
 
-Wallet IDs and addresses are provided per-request in the API (not in server config). Public keys are resolved lazily from Circle on first use, or can be pinned in-request via the `public_key` field to skip the Circle round-trip.
+Wallet IDs and addresses are provided per-request in the API (not in server config). Public keys are resolved lazily from Circle on first use. A request may include `public_key` for early address/key validation, but request-provided keys are not written to the shared wallet cache.
 
 ### Transaction Settings
 
@@ -145,6 +145,7 @@ Configurable in `config.yaml` (see `config.yaml` for full list):
 |----------|---------|-------------|
 | `submitter.poll_interval_ms` | `200` | How often the dispatcher checks for queued work |
 | `submitter.signing_pipeline_depth` | `4` | How many transactions to sign ahead per sender |
+| `submitter.max_active_sender_workers` | `128` | Maximum number of per-sender workers running in one process |
 | `submitter.max_retry_duration_seconds` | `300` | Max time before marking a transaction permanently failed |
 | `submitter.retry_interval_seconds` | `5` | Base retry interval on transient failure |
 | `poller.interval_seconds` | `5` | How often to poll on-chain for submitted transactions |
@@ -159,7 +160,7 @@ Configurable in `config.yaml` (see `config.yaml` for full list):
 
 ## Security
 
-- **Authentication:** All endpoints except `/v1/health` require a Bearer token or `X-API-Key` header. Comparison uses constant-time comparison to prevent timing attacks.
+- **Authentication:** All endpoints except shallow `/v1/health` require a Bearer token or `X-API-Key` header. Comparison uses constant-time comparison to prevent timing attacks.
 - **SSRF protection:** Webhook URLs are validated to reject private, loopback, and link-local addresses — both at request time and at delivery time (dial-level blocking).
 - **Request body limit:** All JSON request bodies are limited to 1 MB.
 - **Rate limiting:** Optional token-bucket rate limiter returns 429 with `Retry-After` header when capacity is exceeded.
@@ -168,7 +169,7 @@ Configurable in `config.yaml` (see `config.yaml` for full list):
 
 ### Authentication
 
-All endpoints except `/v1/health` require authentication. Pass your API key via either:
+All endpoints except shallow `/v1/health` require authentication. Pass your API key via either:
 
 ```
 Authorization: Bearer <API_KEY>
@@ -307,13 +308,13 @@ queued → processing → submitted → confirmed
 
 ### GET /v1/health
 
-Returns server liveness. No authentication required.
+Returns server liveness. No authentication required for the shallow check.
 
 ```json
 {"status": "ok"}
 ```
 
-With `?deep=1`, also verifies MySQL connectivity:
+With `?deep=1`, also verifies MySQL connectivity and requires API authentication outside testing mode:
 
 ```json
 {"status": "ok", "db": "ok"}
