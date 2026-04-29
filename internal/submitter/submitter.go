@@ -106,6 +106,7 @@ func (s *Submitter) Run(ctx context.Context) {
 	defer ticker.Stop()
 
 	workers := make(map[string]context.CancelFunc)
+	maxWorkers := s.cfg.SubmitterMaxActiveSenderWorkers()
 	var mu sync.Mutex
 
 	for {
@@ -125,6 +126,13 @@ func (s *Submitter) Run(ctx context.Context) {
 			}
 			mu.Lock()
 			for _, sender := range senders {
+				if len(workers) >= maxWorkers {
+					s.logger.Warn("submitter: active sender worker cap reached",
+						"active_workers", len(workers),
+						"max_workers", maxWorkers,
+					)
+					break
+				}
 				// Skip senders that already have a live worker. The worker's
 				// deferred delete(workers, addr) below clears this entry when
 				// the worker exits (queue drained or failure), at which point

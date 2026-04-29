@@ -25,6 +25,7 @@ submitter:
   stale_processing_seconds: 120
   recovery_tick_seconds: 30
   signing_pipeline_depth: 4
+  max_active_sender_workers: 128
 
 poller:
   interval_seconds: 5

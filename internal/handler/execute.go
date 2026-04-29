@@ -27,11 +27,10 @@ import (
 //
 // FeePayer is optional; when absent the sender pays its own gas.
 //
-// PublicKey is optional: clients that already know the wallet's Ed25519 public
-// key can pass it to skip the Circle API round-trip the submitter would
-// otherwise make on first use of this wallet. The server validates that the
-// key's authkey equals Address before seeding the cache — a bad key is a 400,
-// not a silent cache poison.
+// PublicKey is optional. The server validates that the key's authkey equals
+// Address so a bad key is rejected early, but it deliberately does not seed the
+// process-wide wallet cache from request input: wallet_id is caller-supplied,
+// and only Circle can attest that a wallet ID owns a given address/public key.
 type executeRequest struct {
 	WalletID       string        `json:"wallet_id"`
 	Address        string        `json:"address"`
@@ -49,8 +48,8 @@ type executeRequest struct {
 // sender. The service signs once as the sender and once as the fee payer and
 // assembles a fee-payer transaction (see internal/submitter.prepareRecord).
 //
-// PublicKey is optional with the same semantics as the top-level field: seed
-// the cache now, skip the Circle lookup later.
+// PublicKey is optional with the same validation semantics as the top-level
+// field. It is not written to the shared wallet cache.
 type feePayerInfo struct {
 	WalletID  string `json:"wallet_id"`
 	Address   string `json:"address"`
@@ -140,9 +139,8 @@ func Execute(cfg *config.Config, st store.Store, pkCache *circle.PublicKeyCache,
 		canonicalSender := senderAddr.StringLong()
 
 		// If the client provided a public key, verify it matches the address
-		// (authkey == address) before seeding the cache. We refuse silently-bad
-		// keys here so a typo becomes a 4xx on this request instead of a
-		// delayed signing failure on the next.
+		// (authkey == address). We refuse silently-bad keys here so a typo
+		// becomes a 4xx on this request instead of a delayed signing failure.
 		if req.PublicKey != "" {
 			if err := verifyWalletPublicKey(req.Address, req.PublicKey); err != nil {
 				errorResponse(w, http.StatusBadRequest, "public_key mismatch: "+err.Error())
@@ -173,15 +171,6 @@ func Execute(cfg *config.Config, st store.Store, pkCache *circle.PublicKeyCache,
 			}
 			feePayerWalletID = req.FeePayer.WalletID
 			feePayerAddress = fpAddr.StringLong()
-		}
-
-		// Seed the cache after all validation passes (not before) so a bad
-		// fee-payer field doesn't leave a sender key half-committed.
-		if req.PublicKey != "" && pkCache != nil {
-			pkCache.Set(req.WalletID, req.PublicKey)
-		}
-		if req.FeePayer != nil && req.FeePayer.PublicKey != "" && pkCache != nil {
-			pkCache.Set(req.FeePayer.WalletID, req.FeePayer.PublicKey)
 		}
 
 		qp := store.QueuedPayload{

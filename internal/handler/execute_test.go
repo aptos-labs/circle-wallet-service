@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -535,7 +536,7 @@ func TestExecute_IdempotencyKeyHeader(t *testing.T) {
 	}
 }
 
-func TestExecute_PublicKeySeeds(t *testing.T) {
+func TestExecute_PublicKeyValidatesButDoesNotSeed(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
 	pkCache := circle.NewPublicKeyCache(nil)
@@ -556,12 +557,8 @@ func TestExecute_PublicKeySeeds(t *testing.T) {
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
 	}
-	got, err := pkCache.Resolve(context.Background(), "w-seed")
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if got != pk {
-		t.Fatalf("cache got %q want %q", got, pk)
+	if got := publicKeyCacheEntries(pkCache); got != 0 {
+		t.Fatalf("cache entries = %d, want 0", got)
 	}
 }
 
@@ -592,7 +589,7 @@ func TestExecute_PublicKeyMismatchRejected(t *testing.T) {
 	}
 }
 
-func TestExecute_FeePayerPublicKeySeeds(t *testing.T) {
+func TestExecute_FeePayerPublicKeyValidatesButDoesNotSeed(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
 	pkCache := circle.NewPublicKeyCache(nil)
@@ -618,12 +615,11 @@ func TestExecute_FeePayerPublicKeySeeds(t *testing.T) {
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
 	}
+	if got := publicKeyCacheEntries(pkCache); got != 0 {
+		t.Fatalf("cache entries = %d, want 0", got)
+	}
+}
 
-	got, err := pkCache.Resolve(context.Background(), "w-fp")
-	if err != nil {
-		t.Fatalf("resolve fp: %v", err)
-	}
-	if got != fpPK {
-		t.Fatalf("fp cache got %q want %q", got, fpPK)
-	}
+func publicKeyCacheEntries(cache *circle.PublicKeyCache) int {
+	return reflect.ValueOf(cache).Elem().FieldByName("entries").Len()
 }

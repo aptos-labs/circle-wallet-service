@@ -72,7 +72,7 @@ Examples:
   go run ./cmd/cli execute \
     -w "circle-wallet-uuid" \
     -addr "0xSENDER_ADDRESS" \
-    -pk "0xSENDER_PUBLIC_KEY" \          # optional — seeds pubkey cache
+    -pk "0xSENDER_PUBLIC_KEY" \          # optional — validates address/key pair
     -f "0x1::aptos_account::transfer" \
     -a "0xRECIPIENT" -a "100"
 

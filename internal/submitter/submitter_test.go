@@ -690,6 +690,46 @@ func TestDispatcherSpawnsWorkersForMultipleSenders(t *testing.T) {
 	t.Fatalf("expected 3 claim attempts, got %d", mq.loadClaimCalls())
 }
 
+func TestDispatcherCapsActiveSenderWorkers(t *testing.T) {
+	var mu sync.Mutex
+	claimed := map[string]bool{}
+	mq := &mockQueue{
+		listQueuedSenders: func(ctx context.Context) ([]string, error) {
+			return []string{"0xs1", "0xs2", "0xs3", "0xs4"}, nil
+		},
+		claimNextQueuedForSender: func(ctx context.Context, sender string) (*store.TransactionRecord, error) {
+			mu.Lock()
+			claimed[sender] = true
+			mu.Unlock()
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	cfg := &config.Config{
+		Submitter: config.SubmitterConfig{
+			PollIntervalMs:          10,
+			RecoveryTickSeconds:     3600,
+			MaxRetryDurationSeconds: 300,
+			RetryIntervalSeconds:    0,
+			RetryJitterSeconds:      0,
+			SigningPipelineDepth:    1,
+			MaxActiveSenderWorkers:  2,
+		},
+	}
+	s := New(cfg, mq, nil, nil, nil, nil, noopNotifier{}, slog.New(slog.DiscardHandler))
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+	go s.Run(ctx)
+	<-ctx.Done()
+
+	mu.Lock()
+	got := len(claimed)
+	mu.Unlock()
+	if got != 2 {
+		t.Fatalf("active sender workers = %d, want 2", got)
+	}
+}
+
 func TestDispatcherDoesNotDuplicateWorkers(t *testing.T) {
 	slot := make(chan struct{}, 1)
 	mq := &mockQueue{
