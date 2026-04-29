@@ -127,9 +127,10 @@ func (s *Submitter) Run(ctx context.Context) {
 			mu.Lock()
 			for _, sender := range senders {
 				if len(workers) >= maxWorkers {
-					s.logger.Warn("submitter: active sender worker cap reached",
+					s.logger.Debug("submitter: active sender worker cap reached",
 						"active_workers", len(workers),
 						"max_workers", maxWorkers,
+						"blocked_sender", sender,
 					)
 					break
 				}

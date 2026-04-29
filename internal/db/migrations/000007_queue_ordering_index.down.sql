@@ -1,1 +1,3 @@
-ALTER TABLE transactions DROP KEY idx_queue_sender_created;
+ALTER TABLE transactions
+  DROP KEY idx_queue,
+  ADD KEY idx_queue (status, sender_address, id);
