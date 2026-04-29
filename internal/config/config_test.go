@@ -325,12 +325,13 @@ func TestAccessorMethods(t *testing.T) {
 	cfg.Submitter.StaleProcessingSeconds = 15
 	cfg.Submitter.RecoveryTickSeconds = 16
 	cfg.Submitter.SigningPipelineDepth = 17
+	cfg.Submitter.MaxActiveSenderWorkers = 18
 	cfg.Webhook.GlobalURL = "https://w"
-	cfg.Webhook.MaxRetries = 18
-	cfg.Webhook.TimeoutSeconds = 19
+	cfg.Webhook.MaxRetries = 19
+	cfg.Webhook.TimeoutSeconds = 20
 	cfg.RateLimit.Enabled = true
-	cfg.RateLimit.RequestsPerSecond = 20
-	cfg.RateLimit.Burst = 21
+	cfg.RateLimit.RequestsPerSecond = 21
+	cfg.RateLimit.Burst = 22
 	cfg.RateLimit.PerWallet = true
 
 	if cfg.ServerPort() != "3000" {
@@ -357,15 +358,16 @@ func TestAccessorMethods(t *testing.T) {
 		cfg.SubmitterRetryJitterSeconds() != 14 ||
 		cfg.SubmitterStaleProcessingSeconds() != 15 ||
 		cfg.SubmitterRecoveryTickSeconds() != 16 ||
-		cfg.SubmitterSigningPipelineDepth() != 17 {
+		cfg.SubmitterSigningPipelineDepth() != 17 ||
+		cfg.SubmitterMaxActiveSenderWorkers() != 18 {
 		t.Fatal("submitter accessors")
 	}
-	if cfg.WebhookMaxRetries() != 18 || cfg.WebhookTimeoutSeconds() != 19 {
+	if cfg.WebhookMaxRetries() != 19 || cfg.WebhookTimeoutSeconds() != 20 {
 		t.Fatal("webhook accessors")
 	}
 	if !cfg.RateLimitEnabled() ||
-		cfg.RateLimitRequestsPerSecond() != 20 ||
-		cfg.RateLimitBurst() != 21 ||
+		cfg.RateLimitRequestsPerSecond() != 21 ||
+		cfg.RateLimitBurst() != 22 ||
 		!cfg.RateLimitPerWallet() {
 		t.Fatal("rate limit accessors")
 	}
