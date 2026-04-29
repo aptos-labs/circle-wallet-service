@@ -167,7 +167,7 @@ func run(logger *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	if aptosClient != nil && circleSigner != nil {
-		mux.HandleFunc("POST /v1/execute", handler2.Execute(cfg, memStore, pubkeyCache, logger))
+		mux.HandleFunc("POST /v1/execute", handler2.Execute(cfg, memStore, logger))
 	} else {
 		mux.HandleFunc("POST /v1/execute", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")

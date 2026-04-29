@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/aptos-labs/jc-contract-integration/internal/aptos"
-	"github.com/aptos-labs/jc-contract-integration/internal/circle"
 	"github.com/aptos-labs/jc-contract-integration/internal/config"
 	"github.com/aptos-labs/jc-contract-integration/internal/store"
 	"github.com/google/uuid"
@@ -71,7 +70,7 @@ type feePayerInfo struct {
 // created. A race where two concurrent requests carry the same key is resolved
 // by the unique index on idempotency_key: the loser gets ErrIdempotencyConflict
 // from the store and falls into the same replay path.
-func Execute(cfg *config.Config, st store.Store, pkCache *circle.PublicKeyCache, logger *slog.Logger) http.HandlerFunc {
+func Execute(cfg *config.Config, st store.Store, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req executeRequest
 		if err := decodeJSON(w, r, &req); err != nil {

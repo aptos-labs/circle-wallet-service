@@ -1,6 +1,8 @@
 -- Match ClaimNextQueuedForSender:
 --   WHERE status = ? AND sender_address = ?
 --   ORDER BY created_at ASC, id ASC
--- Without created_at in the index, large per-sender queues can require extra
--- scanning/filesort work while the claim transaction holds locks.
-ALTER TABLE transactions ADD KEY idx_queue_sender_created (status, sender_address, created_at, id);
+-- Replaces the older idx_queue(status, sender_address, id) so we avoid a
+-- redundant overlapping index and the write amplification that comes with it.
+ALTER TABLE transactions
+  DROP KEY idx_queue,
+  ADD KEY idx_queue (status, sender_address, created_at, id);
