@@ -534,7 +534,7 @@ func TestExecute_IdempotencyKeyHeader(t *testing.T) {
 	}
 }
 
-func TestExecute_PublicKeyValidatesButDoesNotSeed(t *testing.T) {
+func TestExecute_PublicKeyAcceptedWhenMatchesAddress(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
 	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
@@ -582,7 +582,7 @@ func TestExecute_PublicKeyMismatchRejected(t *testing.T) {
 	}
 }
 
-func TestExecute_FeePayerPublicKeyValidatesButDoesNotSeed(t *testing.T) {
+func TestExecute_FeePayerPublicKeyAcceptedWhenMatchesAddress(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
 	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
