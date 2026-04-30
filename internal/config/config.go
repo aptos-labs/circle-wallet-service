@@ -205,6 +205,8 @@ type Config struct {
 	RateLimit   RateLimitConfig   `yaml:"rate_limit"`
 }
 
+const defaultMaxActiveSenderWorkers = 128
+
 func defaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
@@ -229,7 +231,7 @@ func defaultConfig() *Config {
 			StaleProcessingSeconds:           120,
 			RecoveryTickSeconds:              30,
 			SigningPipelineDepth:             4,
-			MaxActiveSenderWorkers:           128,
+			MaxActiveSenderWorkers:           defaultMaxActiveSenderWorkers,
 			SimulateBeforeSubmit:             true,
 			CalibrateGasFromSimulation:       true,
 			CircleSignTimeoutSeconds:         15,
@@ -568,7 +570,7 @@ func (c *Config) SubmitterMaxActiveSenderWorkers() int {
 	if c.Submitter.MaxActiveSenderWorkers > 0 {
 		return c.Submitter.MaxActiveSenderWorkers
 	}
-	return 128
+	return defaultMaxActiveSenderWorkers
 }
 
 func (c *Config) SimulateBeforeSubmit() bool {
