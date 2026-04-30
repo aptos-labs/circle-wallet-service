@@ -13,7 +13,6 @@ import (
 
 	aptossdk "github.com/aptos-labs/aptos-go-sdk"
 	"github.com/aptos-labs/aptos-go-sdk/crypto"
-	"github.com/aptos-labs/jc-contract-integration/internal/circle"
 	"github.com/aptos-labs/jc-contract-integration/internal/config"
 	"github.com/aptos-labs/jc-contract-integration/internal/store"
 )
@@ -102,7 +101,7 @@ func (s *createFailStore) Create(ctx context.Context, rec *store.TransactionReco
 func TestExecute_ValidRequest(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	body := map[string]any{
 		"wallet_id":   "w1",
@@ -133,7 +132,7 @@ func TestExecute_ValidRequest(t *testing.T) {
 func TestExecute_MissingWalletID(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	body := map[string]any{"address": "0x1", "function_id": "0x1::m::f"}
 	b, _ := json.Marshal(body)
@@ -148,7 +147,7 @@ func TestExecute_MissingWalletID(t *testing.T) {
 func TestExecute_MissingAddress(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	body := map[string]any{"wallet_id": "w", "function_id": "0x1::m::f"}
 	b, _ := json.Marshal(body)
@@ -163,7 +162,7 @@ func TestExecute_MissingAddress(t *testing.T) {
 func TestExecute_MissingFunctionID(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	body := map[string]any{"wallet_id": "w", "address": "0x1"}
 	b, _ := json.Marshal(body)
@@ -178,7 +177,7 @@ func TestExecute_MissingFunctionID(t *testing.T) {
 func TestExecute_WithFeePayer(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	body := map[string]any{
 		"wallet_id":   "w1",
@@ -215,7 +214,7 @@ func TestExecute_WithFeePayer(t *testing.T) {
 func TestExecute_InvalidFeePayerAddress(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	body := map[string]any{
 		"wallet_id":   "w1",
@@ -238,7 +237,7 @@ func TestExecute_InvalidFeePayerAddress(t *testing.T) {
 func TestExecute_IdempotencyKeyBody(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	base := map[string]any{
 		"wallet_id":       "w1",
@@ -273,7 +272,7 @@ func TestExecute_IdempotencyLookupError(t *testing.T) {
 	cfg := testConfig()
 	base := newTestMemoryStore(t)
 	st := &idempLookupFailStore{MemoryStore: base}
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	body := map[string]any{
 		"wallet_id": "w1", "address": "0x1", "function_id": "0x1::m::f",
@@ -291,7 +290,7 @@ func TestExecute_IdempotencyLookupError(t *testing.T) {
 func TestExecute_CreateFailure(t *testing.T) {
 	cfg := testConfig()
 	st := &createFailStore{MemoryStore: newTestMemoryStore(t)}
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	body := map[string]any{"wallet_id": "w1", "address": "0x1", "function_id": "0x1::m::f"}
 	b, _ := json.Marshal(body)
@@ -306,7 +305,7 @@ func TestExecute_CreateFailure(t *testing.T) {
 func TestExecute_IdempotentReplayWithHashAndSequence(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	now := time.Now().UTC()
 	seq := uint64(9)
@@ -354,7 +353,7 @@ func TestExecute_IdempotentReplayWithHashAndSequence(t *testing.T) {
 func TestExecute_UnknownJSONField(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/execute", bytes.NewReader([]byte(
 		`{"wallet_id":"w1","address":"0x1","function_id":"0x1::m::f","not_allowed":true}`,
@@ -369,7 +368,7 @@ func TestExecute_UnknownJSONField(t *testing.T) {
 func TestExecute_FeePayerMissingWalletID(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	body := map[string]any{
 		"wallet_id": "w1", "address": "0x1", "function_id": "0x1::m::f",
@@ -387,7 +386,7 @@ func TestExecute_FeePayerMissingWalletID(t *testing.T) {
 func TestExecute_FeePayerMissingAddress(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	body := map[string]any{
 		"wallet_id": "w1", "address": "0x1", "function_id": "0x1::m::f",
@@ -405,7 +404,7 @@ func TestExecute_FeePayerMissingAddress(t *testing.T) {
 func TestExecute_InvalidJSON(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/execute", bytes.NewReader([]byte(`{"wallet_id":`)))
 	rr := httptest.NewRecorder()
@@ -418,7 +417,7 @@ func TestExecute_InvalidJSON(t *testing.T) {
 func TestExecute_InvalidAddress(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	body := map[string]any{
 		"wallet_id":   "w1",
@@ -437,7 +436,7 @@ func TestExecute_InvalidAddress(t *testing.T) {
 func TestExecute_WithTypeArguments(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	body := map[string]any{
 		"wallet_id":      "w1",
@@ -478,7 +477,7 @@ func TestExecute_ExpiresAtFromConfig(t *testing.T) {
 	cfg := testConfig()
 	cfg.Transaction.ExpirationSeconds = 7200
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	body := map[string]any{"wallet_id": "w1", "address": "0x1", "function_id": "0x1::m::f"}
 	b, _ := json.Marshal(body)
@@ -504,7 +503,7 @@ func TestExecute_ExpiresAtFromConfig(t *testing.T) {
 func TestExecute_IdempotencyKeyHeader(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	h := Execute(cfg, st, nil, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	base := map[string]any{
 		"wallet_id":   "w1",
@@ -535,11 +534,10 @@ func TestExecute_IdempotencyKeyHeader(t *testing.T) {
 	}
 }
 
-func TestExecute_PublicKeySeeds(t *testing.T) {
+func TestExecute_PublicKeyAcceptedWhenMatchesAddress(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	pkCache := circle.NewPublicKeyCache(nil)
-	h := Execute(cfg, st, pkCache, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	addr, pk := newTestKeyPair(t)
 	body := map[string]any{
@@ -556,20 +554,12 @@ func TestExecute_PublicKeySeeds(t *testing.T) {
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
 	}
-	got, err := pkCache.Resolve(context.Background(), "w-seed")
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if got != pk {
-		t.Fatalf("cache got %q want %q", got, pk)
-	}
 }
 
 func TestExecute_PublicKeyMismatchRejected(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	pkCache := circle.NewPublicKeyCache(nil)
-	h := Execute(cfg, st, pkCache, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	addrA, _ := newTestKeyPair(t)
 	_, pkB := newTestKeyPair(t)
@@ -592,11 +582,10 @@ func TestExecute_PublicKeyMismatchRejected(t *testing.T) {
 	}
 }
 
-func TestExecute_FeePayerPublicKeySeeds(t *testing.T) {
+func TestExecute_FeePayerPublicKeyAcceptedWhenMatchesAddress(t *testing.T) {
 	cfg := testConfig()
 	st := newTestMemoryStore(t)
-	pkCache := circle.NewPublicKeyCache(nil)
-	h := Execute(cfg, st, pkCache, slog.New(slog.DiscardHandler))
+	h := Execute(cfg, st, slog.New(slog.DiscardHandler))
 
 	senderAddr, senderPK := newTestKeyPair(t)
 	fpAddr, fpPK := newTestKeyPair(t)
@@ -617,13 +606,5 @@ func TestExecute_FeePayerPublicKeySeeds(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
-	}
-
-	got, err := pkCache.Resolve(context.Background(), "w-fp")
-	if err != nil {
-		t.Fatalf("resolve fp: %v", err)
-	}
-	if got != fpPK {
-		t.Fatalf("fp cache got %q want %q", got, fpPK)
 	}
 }
