@@ -41,7 +41,8 @@ func (s *Store) Create(ctx context.Context, rec *store.TransactionRecord) error 
 		maxGas = sql.NullInt64{Int64: int64(*rec.MaxGasAmount), Valid: true}
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.db.ExecContext(
+		ctx, `
 		INSERT INTO transactions (
 			id, sender_address, wallet_id, fee_payer_wallet_id, fee_payer_address,
 			status, sequence_number, function_id, payload_json,
@@ -82,7 +83,8 @@ func (s *Store) Update(ctx context.Context, rec *store.TransactionRecord) error 
 	} else {
 		idemp = nil
 	}
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(
+		ctx, `
 		UPDATE transactions SET
 			sender_address = ?, wallet_id = ?, fee_payer_wallet_id = ?, fee_payer_address = ?,
 			status = ?, sequence_number = ?, function_id = ?, payload_json = ?,
@@ -123,7 +125,8 @@ func (s *Store) UpdateIfStatus(ctx context.Context, rec *store.TransactionRecord
 	} else {
 		idemp = nil
 	}
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(
+		ctx, `
 		UPDATE transactions SET
 			sender_address = ?, wallet_id = ?, fee_payer_wallet_id = ?, fee_payer_address = ?,
 			status = ?, sequence_number = ?, function_id = ?, payload_json = ?,

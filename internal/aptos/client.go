@@ -70,7 +70,8 @@ func (c *Client) BuildTransaction(
 		gas = maxGasAmount
 	}
 
-	rawTxn, err := c.Inner.BuildTransaction(senderAddr, payload,
+	rawTxn, err := c.Inner.BuildTransaction(
+		senderAddr, payload,
 		aptossdk.ExpirationSeconds(c.expirationSec),
 		aptossdk.MaxGasAmount(gas),
 	)
@@ -95,7 +96,8 @@ func (c *Client) BuildFeePayerTransaction(
 		gas = maxGasAmount
 	}
 
-	rawTxn, err := c.Inner.BuildTransactionMultiAgent(senderAddr, payload,
+	rawTxn, err := c.Inner.BuildTransactionMultiAgent(
+		senderAddr, payload,
 		aptossdk.FeePayer(&feePayerAddr),
 		aptossdk.SequenceNumber(sequenceNumber),
 		aptossdk.ExpirationSeconds(c.expirationSec),

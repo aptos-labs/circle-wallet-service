@@ -63,7 +63,8 @@ func run(logger *slog.Logger) error {
 		_ = memStore.Close()
 	}()
 
-	logger.Info("config loaded",
+	logger.Info(
+		"config loaded",
 		"port", cfg.ServerPort(),
 		"aptos_node", cfg.AptosNodeURL(),
 		"testing_mode", cfg.TestingMode(),

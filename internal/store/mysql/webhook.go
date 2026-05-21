@@ -9,7 +9,8 @@ import (
 )
 
 func (s *Store) CreateDelivery(ctx context.Context, rec *webhook.DeliveryRecord) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.db.ExecContext(
+		ctx, `
 		INSERT INTO webhook_deliveries (id, transaction_id, url, payload, status, attempts, last_attempt_at, last_error, next_retry_at, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ID, rec.TransactionID, rec.URL, rec.Payload, rec.Status,
@@ -91,7 +92,8 @@ func (s *Store) ClaimPendingDeliveries(ctx context.Context, limit int) ([]*webho
 }
 
 func (s *Store) UpdateDelivery(ctx context.Context, rec *webhook.DeliveryRecord) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.db.ExecContext(
+		ctx, `
 		UPDATE webhook_deliveries
 		SET status = ?, attempts = ?, last_attempt_at = ?, last_error = ?, next_retry_at = ?
 		WHERE id = ?`,
