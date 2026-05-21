@@ -121,8 +121,8 @@ The server runs embedded migrations on startup. `GET /v1/health?deep=1` checks d
 | `APTOS_NODE_URL` | *(required)* | Aptos node RPC URL (e.g. `https://api.testnet.aptoslabs.com/v1`) |
 | `APTOS_API_KEY` / `aptos.api_key` | *(empty)* | Bearer token sent as `Authorization` on all Aptos requests (SDK, `/view`, `/transactions/simulate`). Required in practice for any non-trivial load — the public endpoint rate-limits per IP. |
 | `APTOS_CHAIN_ID` | `0` | Chain ID: `1` = mainnet, `2` = testnet |
-| `SIMULATE_BEFORE_SUBMIT` | `false` | Run `/transactions/simulate` between build and sign to catch VM errors before consuming a Circle signature |
-| `CALIBRATE_GAS_FROM_SIMULATION` | `false` | Use the simulation's `gas_used` to right-size `max_gas_amount` before signing, reducing over-reservation |
+| `SIMULATE_BEFORE_SUBMIT` | `true` | Run `/transactions/simulate` between build and sign to catch VM errors before consuming a Circle signature |
+| `CALIBRATE_GAS_FROM_SIMULATION` | `true` | Use the simulation's `gas_used` to right-size `max_gas_amount` before signing, reducing over-reservation |
 
 ### Circle
 
@@ -493,8 +493,7 @@ internal/
   aptos/
     abi.go                  ABI cache — fetches and caches module ABIs from Aptos node
     args.go                 BCS serialization — converts JSON arguments to BCS bytes by Move type
-    client.go               Aptos SDK wrapper — fee-payer wrapping with explicit sequence, submit, view
-    simulate.go             Pre-submit simulation — catches VM errors early, optionally calibrates gas
+    client.go               Aptos SDK wrapper — fee-payer wrapping, explicit sequence, submit, view, pre-submit simulation, gas calibration
   circle/
     client.go               Circle HTTP client — RSA key cache, entity secret encryption, sign/transaction
     signer.go               Fee-payer transaction signing via Circle's sign/transaction endpoint
