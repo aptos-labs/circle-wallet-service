@@ -1,5 +1,7 @@
 # Aptos Contract API
 
+[![codecov](https://codecov.io/gh/aptos-labs/circle-wallet-service/branch/main/graph/badge.svg)](https://codecov.io/gh/aptos-labs/circle-wallet-service)
+
 Production-grade REST API for submitting and tracking Aptos Move transactions. Uses [Circle Programmable Wallets](https://developers.circle.com/w3s/programmable-wallets-an-overview) for custodial signing with optional fee-payer (gas station) sponsored transactions.
 
 Wallet IDs and addresses are provided per-request — no wallet configuration on the server. The server manages Aptos sequence numbers, transaction lifecycle, retries, and webhook notifications. It scales horizontally: multiple instances share a MySQL database with row-level locking to prevent duplicate processing.
@@ -41,7 +43,7 @@ Fund each wallet address with testnet APT at https://aptos.dev/en/network/faucet
 
 ### 4. Configure
 
-Create a `.env` file with at minimum `API_KEY`, `MYSQL_DSN`, `APTOS_NODE_URL`, `CIRCLE_API_KEY`, and `CIRCLE_ENTITY_SECRET`. See [Configuration](#configuration) for all options.
+Copy `.env.example` to `.env` and fill in at minimum `API_KEY`, `MYSQL_DSN`, `APTOS_NODE_URL`, `CIRCLE_API_KEY`, and `CIRCLE_ENTITY_SECRET`. See [Configuration](#configuration) for all options.
 
 ### 5. Run
 
@@ -119,6 +121,8 @@ The server runs embedded migrations on startup. `GET /v1/health?deep=1` checks d
 | `APTOS_NODE_URL` | *(required)* | Aptos node RPC URL (e.g. `https://api.testnet.aptoslabs.com/v1`) |
 | `APTOS_API_KEY` / `aptos.api_key` | *(empty)* | Bearer token sent as `Authorization` on all Aptos requests (SDK, `/view`, `/transactions/simulate`). Required in practice for any non-trivial load — the public endpoint rate-limits per IP. |
 | `APTOS_CHAIN_ID` | `0` | Chain ID: `1` = mainnet, `2` = testnet |
+| `SIMULATE_BEFORE_SUBMIT` | `false` | Run `/transactions/simulate` between build and sign to catch VM errors before consuming a Circle signature |
+| `CALIBRATE_GAS_FROM_SIMULATION` | `false` | Use the simulation's `gas_used` to right-size `max_gas_amount` before signing, reducing over-reservation |
 
 ### Circle
 
@@ -483,12 +487,14 @@ The CLI reads `API_KEY` and `API_BASE_URL` (default `http://localhost:8080`) fro
 cmd/
   server/main.go            HTTP server, wiring, graceful shutdown
   cli/main.go               CLI for testing against a running server
+  migrate/                  Standalone migration runner — apply schema without starting the server
 internal/
   config/                   YAML + env config with .env support
   aptos/
     abi.go                  ABI cache — fetches and caches module ABIs from Aptos node
     args.go                 BCS serialization — converts JSON arguments to BCS bytes by Move type
     client.go               Aptos SDK wrapper — fee-payer wrapping with explicit sequence, submit, view
+    simulate.go             Pre-submit simulation — catches VM errors early, optionally calibrates gas
   circle/
     client.go               Circle HTTP client — RSA key cache, entity secret encryption, sign/transaction
     signer.go               Fee-payer transaction signing via Circle's sign/transaction endpoint
@@ -513,6 +519,8 @@ internal/
     store.go                WebhookStore interface + DeliveryRecord type
     notifier.go             Inserts delivery records into the persistent outbox
     worker.go               Background worker: claims, delivers, retries with exponential backoff
+  archive/
+    archiver.go             Background archiver — purges aged terminal rows and nulls old idempotency keys
   db/migrations/            Embedded SQL migrations (auto-applied on startup)
 examples/
   e2e_test.go               End-to-end tests against a running server
@@ -521,6 +529,14 @@ examples/
   multi_user/               Multi-wallet throughput examples
 config.yaml                 Default configuration with all tunables
 ```
+
+### Pre-submit Simulation
+
+When `SIMULATE_BEFORE_SUBMIT=true`, the submitter calls `/transactions/simulate` on the Aptos node between building the transaction and sending it to Circle for signing. VM-level failures (Move aborts, resource not found, etc.) surface here without consuming a Circle signature or an Aptos sequence number. When `CALIBRATE_GAS_FROM_SIMULATION=true`, the simulation's `gas_used` is used to right-size `max_gas_amount` before signing, reducing over-reservation. Transient network errors during simulation (timeouts, temporary dial failures) are classified and retried without failing the transaction.
+
+### Archiver
+
+An optional background goroutine (enabled via `archive.enabled` in `config.yaml`) trims the `transactions` table to prevent unbounded growth. Each sweep does two batched passes: first it NULLs `idempotency_key` on rows older than the idempotency retention window (default 7 days), then it DELETEs fully-aged terminal rows (default 30 days). Deletions cascade to `webhook_deliveries` via the foreign key. Batching keeps individual statements short to avoid holding row locks for extended periods.
 
 ### Signing Flow
 
