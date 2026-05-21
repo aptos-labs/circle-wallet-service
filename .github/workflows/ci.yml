@@ -22,7 +22,7 @@ jobs:
 
       - name: gofumpt
         run: |
-          go install mvdan.cc/gofumpt@latest
+          go install mvdan.cc/gofumpt@v0.10.0
           test -z "$(gofumpt -l .)" || {
             echo "Files not formatted with gofumpt:"
             gofumpt -l .

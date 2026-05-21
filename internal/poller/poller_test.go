@@ -63,7 +63,9 @@ func (s *stubStore) Create(context.Context, *store.TransactionRecord) error {
 func (s *stubStore) Update(context.Context, *store.TransactionRecord) error {
 	return errors.New("stub")
 }
+
 func (s *stubStore) Get(context.Context, string) (*store.TransactionRecord, error) { return nil, nil }
+
 func (s *stubStore) GetByIdempotencyKey(context.Context, string) (*store.TransactionRecord, error) {
 	return nil, nil
 }

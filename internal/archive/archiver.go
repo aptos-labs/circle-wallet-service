@@ -137,7 +137,8 @@ func (a *Archiver) sweep(ctx context.Context) {
 	}
 
 	if idempCleared > 0 || purged > 0 {
-		a.logger.Info("archive: sweep complete",
+		a.logger.Info(
+			"archive: sweep complete",
 			"idempotency_cleared", idempCleared,
 			"rows_purged", purged,
 			"retention_days", int(a.retention/(24*time.Hour)),

@@ -127,7 +127,8 @@ func (s *Submitter) Run(ctx context.Context) {
 			mu.Lock()
 			for _, sender := range senders {
 				if len(workers) >= maxWorkers {
-					s.logger.Debug("submitter: active sender worker cap reached",
+					s.logger.Debug(
+						"submitter: active sender worker cap reached",
 						"active_workers", len(workers),
 						"max_workers", maxWorkers,
 						"blocked_sender", sender,
@@ -268,7 +269,8 @@ func (s *Submitter) pipelineProducer(ctx context.Context, senderAddress string, 
 		if rec.SequenceNumber != nil {
 			claimedSeq = *rec.SequenceNumber
 		}
-		s.logger.Info("submitter: claimed",
+		s.logger.Info(
+			"submitter: claimed",
 			"id", rec.ID,
 			"sender", senderAddress,
 			"sequence", claimedSeq,
@@ -431,7 +433,8 @@ func (s *Submitter) prepareRecord(ctx context.Context, rec *store.TransactionRec
 			// leave the counter stuck and every subsequent submit would hit
 			// the same VM status.
 			if aptos.IsSequenceVmStatus(userTxn.VmStatus) {
-				s.logger.Warn("submitter: simulation reported sequence VM status; reconciling",
+				s.logger.Warn(
+					"submitter: simulation reported sequence VM status; reconciling",
 					"id", rec.ID,
 					"sender", rec.SenderAddress,
 					"sequence", useSeq,
@@ -548,7 +551,8 @@ func (s *Submitter) submitSigned(ctx context.Context, item *signedItem) bool {
 		// do NOT ReleaseSequence here (that would decrement twice) and do
 		// NOT broadcast. The row sits in queued with sequence_number=NULL
 		// and will be re-claimed on the next tick.
-		s.logger.Warn("submitter: pre-submit hash persist skipped; row no longer in processing",
+		s.logger.Warn(
+			"submitter: pre-submit hash persist skipped; row no longer in processing",
 			"id", item.rec.ID,
 			"hash", item.hash,
 			"sequence", item.seqNum,
@@ -564,7 +568,8 @@ func (s *Submitter) submitSigned(ctx context.Context, item *signedItem) bool {
 	// Pre-submit log: the sequence number being sent to the chain. Paired with
 	// the claim log above, this bounds exactly which counter value was used for
 	// this submit attempt.
-	s.logger.Info("submitter: submitting",
+	s.logger.Info(
+		"submitter: submitting",
 		"id", item.rec.ID,
 		"sender", item.rec.SenderAddress,
 		"sequence", item.seqNum,
@@ -579,7 +584,8 @@ func (s *Submitter) submitSigned(ctx context.Context, item *signedItem) bool {
 		// downstream failure paths don't leave a stale hash on the row.
 		item.rec.TxnHash = ""
 		if isSequenceError(err) {
-			s.logger.Warn("submitter: submit rejected as sequence error",
+			s.logger.Warn(
+				"submitter: submit rejected as sequence error",
 				"id", item.rec.ID,
 				"sender", item.rec.SenderAddress,
 				"sequence", item.seqNum,
@@ -618,7 +624,8 @@ func (s *Submitter) submitSigned(ctx context.Context, item *signedItem) bool {
 		// the poller's recovery path will confirm it by on-chain lookup.
 		// Do NOT requeue: that would clear the sequence and risk a duplicate
 		// re-sign at a new sequence number.
-		s.logger.Error("submitter: post-submit status update failed; record left in processing+hash for poller recovery",
+		s.logger.Error(
+			"submitter: post-submit status update failed; record left in processing+hash for poller recovery",
 			"id", item.rec.ID,
 			"hash", item.rec.TxnHash,
 			"sequence", item.seqNum,
@@ -674,7 +681,8 @@ func (s *Submitter) markPermanentFailure(ctx context.Context, rec *store.Transac
 	if hasSeq {
 		failedSeq = *rec.SequenceNumber
 	}
-	s.logger.Warn("submitter: permanent failure",
+	s.logger.Warn(
+		"submitter: permanent failure",
 		"id", rec.ID,
 		"sender", rec.SenderAddress,
 		"kind", kind,
@@ -693,7 +701,8 @@ func (s *Submitter) markPermanentFailure(ctx context.Context, rec *store.Transac
 		if err := s.queue.ShiftSenderSequences(ctx, rec.SenderAddress, failedSeq); err != nil {
 			s.logger.Error("submitter: shift sequences", "sender", rec.SenderAddress, "error", err)
 		} else {
-			s.logger.Info("submitter: shifted siblings after permanent failure",
+			s.logger.Info(
+				"submitter: shifted siblings after permanent failure",
 				"id", rec.ID,
 				"sender", rec.SenderAddress,
 				"failed_seq", failedSeq,
@@ -726,7 +735,8 @@ func (s *Submitter) requeueTransient(ctx context.Context, rec *store.Transaction
 	if hadSequence {
 		releasedSeq = *rec.SequenceNumber
 	}
-	s.logger.Warn("submitter: retry",
+	s.logger.Warn(
+		"submitter: retry",
 		"id", rec.ID,
 		"sender", rec.SenderAddress,
 		"had_sequence", hadSequence,
@@ -745,7 +755,8 @@ func (s *Submitter) requeueTransient(ctx context.Context, rec *store.Transaction
 		if err2 := s.queue.ReleaseSequence(ctx, rec.SenderAddress); err2 != nil {
 			s.logger.Error("submitter: release sequence", "id", rec.ID, "error", err2)
 		} else {
-			s.logger.Info("submitter: released sequence (counter -1)",
+			s.logger.Info(
+				"submitter: released sequence (counter -1)",
 				"id", rec.ID,
 				"sender", rec.SenderAddress,
 				"released_seq", releasedSeq,
@@ -793,7 +804,8 @@ func (s *Submitter) reconcileAndRequeue(ctx context.Context, rec *store.Transact
 	if rec.SequenceNumber != nil {
 		localSeq = *rec.SequenceNumber
 	}
-	s.logger.Warn("submitter: sequence mismatch, reconciling",
+	s.logger.Warn(
+		"submitter: sequence mismatch, reconciling",
 		"id", rec.ID,
 		"sender", rec.SenderAddress,
 		"local_seq_used", localSeq,
@@ -834,7 +846,8 @@ func (s *Submitter) applyReconcile(ctx context.Context, rec *store.TransactionRe
 	// submit. If chain_seq > local_seq_used, our local counter was behind —
 	// most commonly because the account had pre-existing txns when this
 	// service first touched it and the DB counter started at 0.
-	s.logger.Info("submitter: reconcile chain state",
+	s.logger.Info(
+		"submitter: reconcile chain state",
 		"id", rec.ID,
 		"sender", rec.SenderAddress,
 		"local_seq_used", localSeq,
@@ -853,7 +866,8 @@ func (s *Submitter) applyReconcile(ctx context.Context, rec *store.TransactionRe
 		if err := s.queue.ForceResetSequenceToChain(ctx, rec.SenderAddress, chainSeq); err != nil {
 			s.logger.Error("submitter: force reset sequence", "id", rec.ID, "error", err)
 		} else {
-			s.logger.Info("submitter: reset counter (chain-behind)",
+			s.logger.Info(
+				"submitter: reset counter (chain-behind)",
 				"sender", rec.SenderAddress,
 				"chain_seq", chainSeq,
 				"local_seq_used", localSeq,
@@ -863,7 +877,8 @@ func (s *Submitter) applyReconcile(ctx context.Context, rec *store.TransactionRe
 		if err := s.queue.ReconcileSequence(ctx, rec.SenderAddress, chainSeq); err != nil {
 			s.logger.Error("submitter: reconcile sequence", "id", rec.ID, "error", err)
 		} else {
-			s.logger.Info("submitter: reconciled counter",
+			s.logger.Info(
+				"submitter: reconciled counter",
 				"sender", rec.SenderAddress,
 				"counter_raised_to_at_least", chainSeq,
 			)
