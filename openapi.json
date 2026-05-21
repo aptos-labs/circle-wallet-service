@@ -471,8 +471,8 @@
           },
           "max_gas_amount": {
             "type": "integer",
-            "format": "uint64",
-            "description": "Optional gas limit override. Defaults to the server's configured `MAX_GAS_AMOUNT`."
+            "format": "int64",
+            "description": "Optional gas limit override (unsigned; always >= 0). Defaults to the server's configured `MAX_GAS_AMOUNT`."
           },
           "webhook_url": {
             "type": "string",
@@ -603,8 +603,8 @@
           },
           "sequence_number": {
             "type": "integer",
-            "format": "uint64",
-            "description": "Aptos account sequence number allocated to the transaction. Only populated on idempotent replays where the prior submission has already been claimed."
+            "format": "int64",
+            "description": "Aptos account sequence number allocated to the transaction (unsigned; always >= 0). Only populated on idempotent replays where the prior submission has already been claimed."
           }
         },
         "required": ["transaction_id", "status"]
@@ -664,13 +664,13 @@
           },
           "sequence_number": {
             "type": "integer",
-            "format": "uint64",
-            "description": "Aptos account sequence number allocated at claim time. NULL while the record is `queued`."
+            "format": "int64",
+            "description": "Aptos account sequence number allocated at claim time (unsigned; always >= 0). NULL while the record is `queued`."
           },
           "max_gas_amount": {
             "type": "integer",
-            "format": "uint64",
-            "description": "Optional max gas override supplied on `/v1/execute`."
+            "format": "int64",
+            "description": "Optional max gas override supplied on `/v1/execute` (unsigned; always >= 0)."
           },
           "webhook_url": {
             "type": "string",

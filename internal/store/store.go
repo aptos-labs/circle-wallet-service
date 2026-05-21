@@ -57,6 +57,22 @@ type TransactionRecord struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+// clone returns a deep copy of the record. Pointer fields (*uint64) are
+// copied by value so the caller cannot accidentally mutate the stored record
+// by writing through the returned pointer.
+func (r *TransactionRecord) clone() *TransactionRecord {
+	cp := *r
+	if r.SequenceNumber != nil {
+		v := *r.SequenceNumber
+		cp.SequenceNumber = &v
+	}
+	if r.MaxGasAmount != nil {
+		v := *r.MaxGasAmount
+		cp.MaxGasAmount = &v
+	}
+	return &cp
+}
+
 // QueuedPayload is stored in TransactionRecord.PayloadJSON for the worker to rebuild the entry function.
 // Fee-payer fields live on TransactionRecord directly and are not duplicated here.
 type QueuedPayload struct {

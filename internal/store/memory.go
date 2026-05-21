@@ -50,10 +50,10 @@ func (s *MemoryStore) Create(_ context.Context, rec *TransactionRecord) error {
 	}
 
 	now := time.Now()
-	cp := *rec
+	cp := rec.clone()
 	cp.CreatedAt = now
 	cp.UpdatedAt = now
-	s.records[rec.ID] = &cp
+	s.records[rec.ID] = cp
 
 	if cp.IdempotencyKey != "" {
 		s.idempotencyIdx[cp.IdempotencyKey] = cp.ID
@@ -84,9 +84,9 @@ func (s *MemoryStore) Update(_ context.Context, rec *TransactionRecord) error {
 		delete(s.idempotencyIdx, old.IdempotencyKey)
 	}
 
-	cp := *rec
+	cp := rec.clone()
 	cp.UpdatedAt = time.Now()
-	s.records[rec.ID] = &cp
+	s.records[rec.ID] = cp
 
 	if cp.IdempotencyKey != "" {
 		s.idempotencyIdx[cp.IdempotencyKey] = cp.ID
@@ -119,9 +119,9 @@ func (s *MemoryStore) UpdateIfStatus(_ context.Context, rec *TransactionRecord, 
 		delete(s.idempotencyIdx, old.IdempotencyKey)
 	}
 
-	cp := *rec
+	cp := rec.clone()
 	cp.UpdatedAt = time.Now()
-	s.records[rec.ID] = &cp
+	s.records[rec.ID] = cp
 
 	if cp.IdempotencyKey != "" {
 		s.idempotencyIdx[cp.IdempotencyKey] = cp.ID
@@ -139,8 +139,7 @@ func (s *MemoryStore) Get(_ context.Context, id string) (*TransactionRecord, err
 	if !ok {
 		return nil, nil
 	}
-	cp := *rec
-	return &cp, nil
+	return rec.clone(), nil
 }
 
 // GetByIdempotencyKey returns a copy of the record matching the given idempotency key.
@@ -159,8 +158,7 @@ func (s *MemoryStore) GetByIdempotencyKey(_ context.Context, key string) (*Trans
 	if !ok {
 		return nil, nil
 	}
-	cp := *rec
-	return &cp, nil
+	return rec.clone(), nil
 }
 
 // ListByStatus returns copies of all records matching the given status.
@@ -171,8 +169,7 @@ func (s *MemoryStore) ListByStatus(_ context.Context, status TxnStatus) ([]*Tran
 	var result []*TransactionRecord
 	for _, rec := range s.records {
 		if rec.Status == status {
-			cp := *rec
-			result = append(result, &cp)
+			result = append(result, rec.clone())
 		}
 	}
 	return result, nil
@@ -198,8 +195,7 @@ func (s *MemoryStore) ListByStatusPaged(_ context.Context, status TxnStatus, lim
 		if rec.UpdatedAt.Equal(afterUpdatedAt) && rec.ID <= afterID {
 			continue
 		}
-		cp := *rec
-		matched = append(matched, &cp)
+		matched = append(matched, rec.clone())
 	}
 	sort.Slice(matched, func(i, j int) bool {
 		if !matched[i].UpdatedAt.Equal(matched[j].UpdatedAt) {
