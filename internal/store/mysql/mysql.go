@@ -58,7 +58,11 @@ func (s *Store) Create(ctx context.Context, rec *store.TransactionRecord) error 
 	)
 	if err != nil {
 		var me *mysql.MySQLError
-		if errors.As(err, &me) && me.Number == 1062 {
+		// 1062 = ER_DUP_ENTRY. Only map it to ErrIdempotencyConflict when the
+		// violated key is uk_idempotency; a PK collision on `id` (UUID, extremely
+		// unlikely) should surface as a plain error rather than a misleading
+		// idempotency conflict.
+		if errors.As(err, &me) && me.Number == 1062 && strings.Contains(me.Message, "uk_idempotency") {
 			return fmt.Errorf("%w", store.ErrIdempotencyConflict)
 		}
 		return err

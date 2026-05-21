@@ -59,33 +59,31 @@ func (n *DebugNotifier) Notify(_ context.Context, rec *store.TransactionRecord) 
 	n.logger.Debug("debug notifier", "txn", rec)
 }
 
-// WebHookNotifier writes delivery records to the persistent outbox. It resolves the
-// webhook URL (per-request URL) and inserts a
-// pending [DeliveryRecord] for the [Worker] to pick up.
-type WebHookNotifier struct {
-	globalUrl string
+// WebhookNotifier writes delivery records to the persistent outbox. It resolves
+// the webhook URL (per-request or global) and inserts a pending [DeliveryRecord]
+// for the [Worker] to pick up.
+type WebhookNotifier struct {
+	globalURL string
 	store     WebhookStore
 	logger    *slog.Logger
 }
 
-func NewWebhookNotifier(globalUrl string, ws WebhookStore, logger *slog.Logger) Notifier {
-	return &WebHookNotifier{
-		globalUrl: globalUrl,
+func NewWebhookNotifier(globalURL string, ws WebhookStore, logger *slog.Logger) Notifier {
+	return &WebhookNotifier{
+		globalURL: globalURL,
 		store:     ws,
 		logger:    logger,
 	}
 }
 
 // Notify sends a message to the webhook consumer
-func (n *WebHookNotifier) Notify(ctx context.Context, rec *store.TransactionRecord) {
+func (n *WebhookNotifier) Notify(ctx context.Context, rec *store.TransactionRecord) {
 	url := rec.WebhookURL
 
 	if url == "" {
-		if n.globalUrl != "" {
-			// Use global if available
-			url = n.globalUrl
+		if n.globalURL != "" {
+			url = n.globalURL
 		} else {
-			// Quit early if no webhook
 			return
 		}
 	}
@@ -103,7 +101,7 @@ func (n *WebHookNotifier) Notify(ctx context.Context, rec *store.TransactionReco
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		n.logger.Error("webhook marshal failed", "txn_id", rec.ID, "error", err)
+		n.logger.Error("webhook: marshal payload", "txn_id", rec.ID, "error", err)
 		return
 	}
 
@@ -118,6 +116,6 @@ func (n *WebHookNotifier) Notify(ctx context.Context, rec *store.TransactionReco
 		CreatedAt:     now,
 	}
 	if err := n.store.CreateDelivery(ctx, delivery); err != nil {
-		n.logger.Error("webhook outbox insert failed", "txn_id", rec.ID, "error", err)
+		n.logger.Error("webhook: outbox insert failed", "txn_id", rec.ID, "error", err)
 	}
 }
