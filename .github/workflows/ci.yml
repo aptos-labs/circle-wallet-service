@@ -67,6 +67,7 @@ jobs:
         run: go test -count=1 -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - uses: codecov/codecov-action@v5
+        if: ${{ secrets.CODECOV_TOKEN != '' }}
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.out
