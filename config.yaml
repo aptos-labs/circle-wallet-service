@@ -35,6 +35,13 @@ webhook:
   max_retries: 5
   timeout_seconds: 10
 
+archive:
+  enabled: false
+  tick_seconds: 300
+  retention_days: 30
+  idempotency_retention_days: 7
+  batch_size: 1000
+
 rate_limit:
   enabled: false
   requests_per_second: 100

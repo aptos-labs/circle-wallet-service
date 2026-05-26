@@ -531,7 +531,7 @@ config.yaml                 Default configuration with all tunables
 
 ### Pre-submit Simulation
 
-When `SIMULATE_BEFORE_SUBMIT=true`, the submitter calls `/transactions/simulate` on the Aptos node between building the transaction and sending it to Circle for signing. VM-level failures (Move aborts, resource not found, etc.) surface here without consuming a Circle signature or an Aptos sequence number. When `CALIBRATE_GAS_FROM_SIMULATION=true`, the simulation's `gas_used` is used to right-size `max_gas_amount` before signing, reducing over-reservation. Transient network errors during simulation (timeouts, temporary dial failures) are classified and retried without failing the transaction.
+When `SIMULATE_BEFORE_SUBMIT=true`, the submitter calls `/transactions/simulate` on the Aptos node between building the transaction and sending it to Circle for signing. VM-level failures (Move aborts, resource not found, etc.) surface here without consuming a Circle signature or an on-chain sequence number. When `CALIBRATE_GAS_FROM_SIMULATION=true`, the simulation's `gas_used` is used to right-size `max_gas_amount` before signing, reducing over-reservation. Transient network errors during simulation (timeouts, temporary dial failures) are classified and retried without failing the transaction.
 
 ### Archiver
 
