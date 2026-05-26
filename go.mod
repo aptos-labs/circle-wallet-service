@@ -1,6 +1,6 @@
 module github.com/aptos-labs/jc-contract-integration
 
-go 1.26.1
+go 1.26.3
 
 require (
 	github.com/aptos-labs/aptos-go-sdk v1.12.1
