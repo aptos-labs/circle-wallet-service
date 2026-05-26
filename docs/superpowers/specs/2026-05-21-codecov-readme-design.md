@@ -18,10 +18,14 @@ Replace the existing test command with one that emits a coverage profile:
   run: go test -count=1 -race -coverprofile=coverage.out -covermode=atomic ./...
 
 - uses: codecov/codecov-action@v5
+  if: ${{ secrets.CODECOV_TOKEN != '' }}
   with:
+    token: ${{ secrets.CODECOV_TOKEN }}
     files: coverage.out
     fail_ci_if_error: true
 ```
+
+The upload step is gated on `secrets.CODECOV_TOKEN` being set so that fork PRs (where secrets are not exposed) do not fail CI — coverage upload is simply skipped for those workflows.
 
 Scope: unit test job only (not smoke, not e2e). The `test` job already spins up MySQL, so all packages including `store/mysql` are exercised.
 
