@@ -52,7 +52,7 @@ Add a Codecov badge to the top of `README.md` pointing to the repo's Codecov pag
 
 Add at top of file.
 
-### 2. Quick Start — Step 1
+### 2. Quick Start — Step 4 (Configure)
 
 Mention `.env.example` as the template to copy, since `make help` already references it but the README does not.
 
@@ -62,8 +62,8 @@ Add two missing env vars:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SIMULATE_BEFORE_SUBMIT` | `false` | Run `/transactions/simulate` between build and sign to catch VM errors early |
-| `CALIBRATE_GAS_FROM_SIMULATION` | `false` | Use simulation's `gas_used` to right-size `max_gas_amount` before signing |
+| `SIMULATE_BEFORE_SUBMIT` | `true` | Run `/transactions/simulate` between build and sign to catch VM errors early |
+| `CALIBRATE_GAS_FROM_SIMULATION` | `true` | Use simulation's `gas_used` to right-size `max_gas_amount` before signing |
 
 ### 4. Architecture tree — additions
 
@@ -76,7 +76,7 @@ Add a short paragraph explaining the two-phase sweep (idempotency key nulling + 
 
 ### 6. Architecture prose — Pre-submit simulation
 
-Add a short paragraph on `internal/aptos/simulate.go`: runs `/transactions/simulate` before signing to catch Move VM errors early; optionally calibrates `max_gas_amount` from the simulation result; classifies transient network errors to avoid unnecessary retries.
+Add a short paragraph on `internal/aptos/client.go` (simulation helpers): runs `/transactions/simulate` before signing to catch Move VM errors early; optionally calibrates `max_gas_amount` from the simulation result; classifies transient network errors to avoid unnecessary retries.
 
 ---
 
