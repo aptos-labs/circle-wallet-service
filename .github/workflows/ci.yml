@@ -75,7 +75,7 @@ jobs:
           exit "$test_status"
 
       - name: Upload coverage to Codecov
-        if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
+        if: ${{ success() && hashFiles('coverage.out') != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
         uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
           use_oidc: true
@@ -86,7 +86,7 @@ jobs:
           fail_ci_if_error: true
 
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
+        if: ${{ !cancelled() && hashFiles('junit.xml') != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
         uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
           use_oidc: true
@@ -95,7 +95,7 @@ jobs:
           name: unit-test-results
           report_type: test_results
           disable_search: true
-          fail_ci_if_error: true
+          fail_ci_if_error: ${{ success() }}
 
   build:
     name: Build
