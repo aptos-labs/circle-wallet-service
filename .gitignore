@@ -1,4 +1,7 @@
 bin/
+coverage.out
+junit.xml
+test-results.json
 .env
 .env.local
 /high_throughput
