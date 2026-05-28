@@ -86,7 +86,7 @@ jobs:
           fail_ci_if_error: true
 
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() && hashFiles('junit.xml') != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
+        if: ${{ success() && hashFiles('junit.xml') != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
         uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
           use_oidc: true
@@ -95,7 +95,19 @@ jobs:
           name: unit-test-results
           report_type: test_results
           disable_search: true
-          fail_ci_if_error: ${{ success() }}
+          fail_ci_if_error: true
+
+      - name: Upload failed test results to Codecov
+        if: ${{ failure() && hashFiles('junit.xml') != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
+        with:
+          use_oidc: true
+          files: ./junit.xml
+          flags: unit
+          name: unit-test-results
+          report_type: test_results
+          disable_search: true
+          fail_ci_if_error: false
 
   build:
     name: Build
