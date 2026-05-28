@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   lint:
@@ -64,13 +65,36 @@ jobs:
           go-version-file: go.mod
 
       - name: Run unit tests
-        run: go test -count=1 -race -coverprofile=coverage.out -covermode=atomic ./...
+        run: |
+          go install github.com/jstemmer/go-junit-report/v2@latest
+          set +e
+          go test -count=1 -race -coverprofile=coverage.out -covermode=atomic -json ./... 2>&1 | tee test-results.json
+          test_status=${PIPESTATUS[0]}
+          set -e
+          "$(go env GOPATH)/bin/go-junit-report" -parser gojson < test-results.json > junit.xml
+          exit "$test_status"
 
-      - uses: codecov/codecov-action@v5
-        if: ${{ secrets.CODECOV_TOKEN != '' }}
+      - name: Upload coverage to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v5
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage.out
+          use_oidc: true
+          files: ./coverage.out
+          flags: unit
+          name: unit-coverage
+          disable_search: true
+          fail_ci_if_error: true
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v5
+        with:
+          use_oidc: true
+          files: ./junit.xml
+          flags: unit
+          name: unit-test-results
+          report_type: test_results
+          disable_search: true
           fail_ci_if_error: true
 
   build:
