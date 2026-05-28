@@ -1,4 +1,7 @@
 coverage:
+  precision: 2
+  round: down
+  range: "70...100"
   status:
     project:
       default:
@@ -6,3 +9,9 @@ coverage:
     patch:
       default:
         target: auto
+        threshold: 1%
+
+comment:
+  layout: "reach,diff,flags,tree"
+  behavior: default
+  require_changes: false
